@@ -240,7 +240,7 @@ switch($Action){
             }
         }
         $steamJar = if($SteamDir){ Join-Path $SteamDir "jre\desktop.jar" } else { "" }
-        $steam = $Steam -and ($steamJar -ne "") -and (Test-Path $steamJar)
+        $useSteam = [bool]($Steam -and ($steamJar -ne "") -and (Test-Path $steamJar))
 
         $cfg = @{
             campaign         = $Campaign.Replace('\', '/')
@@ -256,7 +256,7 @@ switch($Action){
             memoryMb         = $MemoryMb
             serverJar        = (Resolve-Path $ServerJar).Path.Replace('\', '/')
             javaPath         = ""
-            steam            = $steam
+            steam            = $useSteam
             steamJar         = $steamJar.Replace('\', '/')
             steamNative      = $SteamDir.Replace('\', '/')
         } | ConvertTo-Json -Depth 3
@@ -267,7 +267,7 @@ switch($Action){
         $java = Get-Java
 
         Write-Host "starting coordinator (game $GamePort, http $HttpPort) ..."
-        if($steam){
+        if($useSteam){
             Set-Content -Path (Join-Path $dir "steam_appid.txt") -Value "1127400" -Encoding ascii
             $arguments = @("-Xmx${MemoryMb}m", "-Djava.library.path=`"$SteamDir`"", "-cp", "`"$ServerJar;$steamJar`"", "mindustry.server.ServerLauncher")
         }else{
@@ -284,10 +284,15 @@ switch($Action){
         Set-Content -Path (Join-Path $dir "coordinator.pid") -Value $proc.Id -Encoding utf8
 
         $deadline = (Get-Date).AddSeconds(60)
+        $modLog = Join-Path $dir "config\logs\log-0.txt"
         $ok = $false
         while((Get-Date) -lt $deadline){
             Start-Sleep -Milliseconds 500
             if($proc.HasExited){ break }
+            if((Test-Path $modLog) -and (Select-String -Path $modLog -Pattern "coordinator ready" -Quiet -ErrorAction SilentlyContinue)){
+                $ok = $true
+                break
+            }
             if((Test-Path $log) -and (Select-String -Path $log -Pattern "coordinator ready" -Quiet -ErrorAction SilentlyContinue)){
                 $ok = $true
                 break
@@ -297,7 +302,7 @@ switch($Action){
         if($ok){
             Write-Host "coordinator ready: game 127.0.0.1:$GamePort, http 127.0.0.1:$HttpPort" -ForegroundColor Green
         }else{
-            Write-Host "coordinator did not report ready; see $log" -ForegroundColor Yellow
+            Write-Host "coordinator did not report ready; see $modLog" -ForegroundColor Yellow
         }
     }
 
