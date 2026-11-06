@@ -1,4 +1,4 @@
-[English](README.md) | [Русский](README.ru.md)
+[English](README.md) | [Русский](README.ru.md) | [Релизы](https://github.com/gghanera/mp-sectors/releases)
 
 # MP Sectors — кампания на несколько секторов
 

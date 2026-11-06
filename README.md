@@ -1,4 +1,4 @@
-[English](README.md) | [Русский](README.ru.md)
+[English](README.md) | [Русский](README.ru.md) | [Releases](https://github.com/gghanera/mp-sectors/releases)
 
 # MP Sectors — a multi-sector Mindustry campaign
 
@@ -39,7 +39,7 @@ from the official Anuken/Mindustry releases.
 ### 1. Server
 
 ```powershell
-git clone https://github.com/<your-account>/mp-sectors.git
+git clone https://github.com/gghanera/mp-sectors.git
 cd mp-sectors
 
 .\fetch.ps1                 # downloads libs\server-release.jar
@@ -313,6 +313,7 @@ Create a player-facing zip (mods + scripts + docs):
 
 ## Links
 
+- [Latest release](https://github.com/gghanera/mp-sectors/releases/latest)
 - [Русский README](README.ru.md)
 - [Full Russian description and changelog](docs/MP-Sectors-полное-описание.txt)
 - [Any Research README (English)](any-research/README.en.md)
