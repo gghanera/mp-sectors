@@ -1,0 +1,2 @@
+# Windows batch files must keep CRLF: cmd.exe misparses LF-only files.
+*.cmd -text

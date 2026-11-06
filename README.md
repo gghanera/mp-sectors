@@ -81,6 +81,19 @@ The launcher writes `coordinator/config/mp-coordinator.json`, copies the mods, s
 server jar on the game JRE and shows status. It also has a **“Карта”** button that opens the
 server's campaign map before you connect.
 
+### 4. One-file server installer
+
+Download **`Install-MP-Sectors.cmd`** from the repository root (or the release assets) and
+run it on the server PC. It:
+
+- downloads the latest release and installs the server into `.\MP-Sectors`;
+- puts `mp-campaign.jar` and `any-research.jar` next to itself for the players;
+- checks/installs Java 17+ and PowerShell 7 if needed;
+- creates `start-server.cmd`, `stop-server.cmd`, firewall rules and a desktop shortcut.
+
+It does **not** include a campaign. Copy your `campaign` folder into
+`MP-Sectors\campaign` and run `start-server.cmd`.
+
 ---
 
 ## How it works

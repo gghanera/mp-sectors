@@ -83,6 +83,16 @@ coordinator ready: game 127.0.0.1:6567, http 127.0.0.1:8090
 .\mp-sectors.ps1 coordinator-stop
 ```
 
+### Установщик одним файлом
+
+`Install-MP-Sectors.cmd` — скачай из корня репозитория (или из релиза) и запусти на ПК
+сервера. Он скачает релиз, поставит сервер в `.\MP-Sectors`, положит `mp-campaign.jar` и
+`any-research.jar` рядом с собой, проверит/поставит Java 17+ и PowerShell 7, создаст
+`start-server.cmd`, `stop-server.cmd`, правила брандмауэра и ярлык.
+
+Кампанию установщик **не включает**: скопируй свою папку `campaign` в
+`MP-Sectors\campaign` и запусти `start-server.cmd`.
+
 ## Как играть
 
 1. Зайти на координатор (`IP:6567`) — вы в домашнем секторе.
