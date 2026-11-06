@@ -1,0 +1,30 @@
+# Build outputs and downloaded binaries
+*.jar
+*.zip
+/build/
+/client/build/
+/libs/
+/client/libs/
+/mods/
+/client-mods/
+
+# Campaign data: personal saves, backups, logs
+/campaign/
+/campaign.*/
+/campaign.backup-*/
+/campaign.before-reload-*/
+/backups/
+
+# Coordinator runtime: instances, configs, settings, logs
+/coordinator/
+/config/
+
+# Local / editor / OS files
+.idea/
+.vscode/
+*.iml
+*.log
+*.bin
+*.msav
+Thumbs.db
+desktop.ini
