@@ -322,6 +322,23 @@ public class SectorRunner{
         }
     }
 
+    /** Marks a won sector as captured: it keeps its core and stops counting as attacked. */
+    public synchronized void markCaptured(){
+        Sector sector = sector();
+        if(sector == null) return;
+
+        sector.info.hasCore = true;
+        sector.info.waves = false;
+        sector.info.attack = false;
+        sector.info.wasCaptured = true;
+        try{
+            campaignInfo.parent().mkdirs();
+            writeAtomic(campaignInfo, JsonIO.write(sector.info));
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not mark sector @ as captured", sectorName, t);
+        }
+    }
+
     public synchronized void save(){
         if(!loaded) return;
 

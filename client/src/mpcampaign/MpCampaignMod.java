@@ -532,8 +532,20 @@ public class MpCampaignMod extends Mod{
     private static void restoreOriginals(){
         originalInfo.each((sector, info) -> sector.info = info);
         originalSave.each((sector, slot) -> sector.save = slot);
+
+        //put the story-sector unlock flags back: they were forced on for the campaign map
+        if(unlockedField != null){
+            originalUnlocked.each((content, value) -> {
+                try{
+                    unlockedField.setBoolean(content, value);
+                }catch(Throwable ignored){
+                }
+            });
+        }
+
         originalInfo.clear();
         originalSave.clear();
+        originalUnlocked.clear();
     }
 
     private static SaveSlot fakeSlot(Planet planet, int id){
@@ -561,15 +573,40 @@ public class MpCampaignMod extends Mod{
 
         Sector from = Vars.state.getSector();
 
+        //browsing the map from the menu: use the home sector as the launch source so the
+        //loadout dialog and the cost still apply
+        if(from == null && !entry.hasBase){
+            from = sectorByKey(home);
+        }
+
         //new sector: show the vanilla core loadout dialog, then send the chosen loadout to the server
-        if(!entry.hasBase && from != null && from.hasBase() && Vars.ui.planet != null){
+        Sector source = from;
+        if(!entry.hasBase && source != null && source.hasBase() && Vars.ui.planet != null){
             PlanetDialog planet = Vars.ui.planet;
-            CoreBlock core = from.info != null && from.info.bestCoreType instanceof CoreBlock b ? b : (CoreBlock)from.planet.defaultCore;
-            planet.loadouts.show(core, from, sector, () -> sendLand(sector, from, true));
+            CoreBlock core = source.info != null && source.info.bestCoreType instanceof CoreBlock b ? b : (CoreBlock)source.planet.defaultCore;
+            planet.loadouts.show(core, source, sector, () -> sendLand(sector, source, true));
             return;
         }
 
-        sendLand(sector, from, false);
+        sendLand(sector, source, false);
+    }
+
+    /** Resolves a sector key like "serpulo-76"; used when the map is open from the main menu. */
+    public static Sector sectorByKey(String key){
+        if(key == null || key.isEmpty()) return null;
+
+        int split = key.lastIndexOf('-');
+        if(split <= 0) return null;
+
+        Planet planet = Vars.content.getByName(ContentType.planet, key.substring(0, split));
+        if(planet == null) return null;
+
+        try{
+            int id = Integer.parseInt(key.substring(split + 1));
+            return id >= 0 && id < planet.sectors.size ? planet.sectors.get(id) : null;
+        }catch(NumberFormatException e){
+            return null;
+        }
     }
 
     private static void sendLand(Sector sector, Sector from, boolean withLoadout){
@@ -805,14 +842,9 @@ public class MpCampaignMod extends Mod{
             return;
         }
 
-        int split = home.lastIndexOf('-');
-        if(split <= 0) return;
-
-        Planet planet = Vars.content.getByName(ContentType.planet, home.substring(0, split));
-        int id = Integer.parseInt(home.substring(split + 1));
-        if(planet == null || id < 0 || id >= planet.sectors.size) return;
-
-        land(planet.sectors.get(id));
+        Sector target = sectorByKey(home);
+        if(target == null) return;
+        land(target);
     }
 
     public static void setHome(Sector sector){

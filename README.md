@@ -294,7 +294,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.1.0     # dist\MP-Sectors-2.1.0.zip
+.\package.ps1 -Version 2.1.1     # dist\MP-Sectors-2.1.1.zip
 ```
 
 ---
@@ -319,7 +319,7 @@ Create a player-facing zip (mods + scripts + docs):
 | “Не удалось запустить сектор” | The save has no core or is not a campaign map; land again to regenerate it. Plans are preserved. |
 | Map does not open / “Координатор недоступен” | Check `http://IP:8090/status`, the firewall and the **Адрес** button. |
 | Client and server mod versions differ | Update both `mp-campaign.jar` and `mp-sectors.jar`; the client mod is visible and version-checked. |
-| Chat from other sectors is missing | All players need `mp-campaign.jar` 2.1.0+; the server needs the updated `mp-sectors.jar`. |
+| Chat from other sectors is missing | All players need `mp-campaign.jar` 2.1.1+; the server needs the updated `mp-sectors.jar`. |
 | Snapshot marked “повреждён” | The copy is incomplete; use another snapshot. The coordinator logs the check at startup. |
 
 ---

@@ -184,6 +184,7 @@ public class ResearchServer{
         }
 
         Seq<String> spent = new Seq<>();
+        ObjectSet<Integer> changed = new ObjectSet<>();
 
         for(int i = 0; i < node.requirements.length; i++){
             if(owed[i] == 0) continue;
@@ -200,6 +201,7 @@ public class ResearchServer{
                 if(take > 0){
                     info.items.add(requirement.item, -take);
                     remaining -= take;
+                    changed.add(id);
                 }
             }
 
@@ -221,9 +223,8 @@ public class ResearchServer{
             spent.add(label(requirement.item) + " " + owed[i]);
         }
 
-        //write the changed sector infos back to the campaign store
-        for(Integer id : stock.bases){
-            if(id == currentId) continue;
+        //write only the sector infos that actually changed
+        for(Integer id : changed){
             Fi file = stock.files.get(id);
             if(file != null) SectorRunner.writeAtomic(file, JsonIO.write(stock.infos.get(id)));
         }

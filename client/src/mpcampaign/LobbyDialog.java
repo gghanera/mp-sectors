@@ -248,8 +248,9 @@ public class LobbyDialog extends PlanetDialog{
         SectorInfo info = parsedInfo();
         if(info == null) return "";
 
+        int total = info.items == null ? 0 : info.items.total;
         String core = info.hasCore
-            ? formatAmount(info.items.total) + (info.storageCapacity > 0 ? "/" + formatAmount(info.storageCapacity) : "")
+            ? formatAmount(total) + (info.storageCapacity > 0 ? "/" + formatAmount(info.storageCapacity) : "")
             : "нет ядра";
         String wave = info.waves
             ? "волна " + info.wave + (info.winWave > 0 ? "/" + info.winWave : "")
@@ -273,6 +274,8 @@ public class LobbyDialog extends PlanetDialog{
     }
 
     private static float sum(arc.struct.ObjectMap<Item, SectorInfo.ExportStat> stats){
+        if(stats == null) return 0f;
+
         float total = 0f;
         for(SectorInfo.ExportStat stat : stats.values()){
             if(stat != null) total += stat.mean;

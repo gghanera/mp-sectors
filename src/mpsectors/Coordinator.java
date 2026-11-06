@@ -552,6 +552,10 @@ public class Coordinator{
             //would merge it back into the restored unlocks.json
             SectorRunner.relockTo(campaign.child("unlocks.json"));
 
+            //the in-memory log belongs to the old campaign; load the restored one
+            loadHistory();
+            captured.clear();
+
             String key = readHomeSector();
             if(key == null) key = homeSector;
 
@@ -569,6 +573,14 @@ public class Coordinator{
             homeSector = key;
             lastAutosave = System.currentTimeMillis();
             lastSnapshot = System.currentTimeMillis();
+
+            //the capture path may have closed the server while the vanilla game-over rotated the map
+            try{
+                if(!Vars.net.server()) Vars.netServer.openServer();
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not reopen the game server", t);
+            }
+
             Log.info("[mp-sectors] campaign restored, home=@", key);
         }catch(Throwable t){
             Log.err("[mp-sectors] could not reload the restored campaign", t);
@@ -786,6 +798,15 @@ public class Coordinator{
         event.player = player == null ? "" : player;
         event.text = text == null ? "" : text;
 
+        //the instance reports a capture/loss, and the coordinator's map scan may report it again
+        if((event.type.equals("capture") || event.type.equals("lost")) && !history.isEmpty()){
+            HistoryEvent last = history.get(history.size() - 1);
+            if(last.type.equals(event.type) && last.sector.equals(event.sector)
+                && Math.abs(event.time - last.time) < 10 * 60 * 1000L){
+                return;
+            }
+        }
+
         history.add(event);
         while(history.size() > maxHistoryEvents) history.remove(0);
 
@@ -833,14 +854,16 @@ public class Coordinator{
         if(sector == null) return "{\"ok\":false,\"error\":\"Нет такого сектора.\"}";
 
         String key = req.planet + "-" + req.id;
-        Jval notes = readNotes();
-        Jval entry = Jval.newObject();
-        entry.put("title", req.title == null ? "" : req.title.trim());
-        entry.put("note", req.note == null ? "" : req.note.trim());
-        notes.put(key, entry);
+        synchronized(campaignLock){
+            Jval notes = readNotes();
+            Jval entry = Jval.newObject();
+            entry.put("title", req.title == null ? "" : req.title.trim());
+            entry.put("note", req.note == null ? "" : req.note.trim());
+            notes.put(key, entry);
 
-        notesFile.parent().mkdirs();
-        SectorRunner.writeAtomic(notesFile, notes.toString());
+            notesFile.parent().mkdirs();
+            SectorRunner.writeAtomic(notesFile, notes.toString());
+        }
 
         addHistory("note", key, req.player, "Название/заметка обновлены");
         return "{\"ok\":true}";
@@ -897,8 +920,9 @@ public class Coordinator{
 
         StringBuilder json = new StringBuilder();
         synchronized(chat){
-            //a restarted coordinator starts ids from 1; a client with an old id must not stall
-            if(since > chatId) since = chatId;
+            //a restarted coordinator starts ids from 1; a client with an old id must not stall,
+            //and the first message after the restart must not be skipped either
+            if(since > chatId) since = chat.isEmpty() ? chatId : chat.get(0).id - 1;
             if(!chat.isEmpty() && since < chat.get(0).id - 1) since = chat.get(0).id - 1;
 
             json.append("{\"next\":").append(chatId).append(",\"messages\":[");
@@ -939,6 +963,27 @@ public class Coordinator{
         home.markLost();
         home.loaded = false;
         addHistory("lost", homeSector, "", "Домашний сектор потерян");
+
+        //do not keep serving a dead world on the home port until the coordinator restarts
+        for(Player player : Groups.player.copy()){
+            player.kick(KickReason.serverRestarting);
+        }
+        try{
+            if(Vars.net != null) Vars.net.closeServer();
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not close the home server", t);
+        }
+    }
+
+    /** The home sector was won: keep the base, record it and reload the world. */
+    public void homeCaptured(){
+        if(home == null || !home.loaded) return;
+        home.save();
+        home.markCaptured();
+        addHistory("capture", homeSector, "", "Домашний сектор захвачен");
+        home.loaded = false;
+        //the vanilla game-over code may rotate to a built-in map; reload the real home after it
+        Core.app.post(this::reloadHome);
     }
 
     // ---------------- http ----------------
@@ -1054,7 +1099,7 @@ public class Coordinator{
                 String key = planet.name + "-" + sector.id;
                 SectorInfo info = snap.info.get(key);
                 boolean hasBase = snap.hasBase.get(key, false);
-                boolean running = key.equals(homeSector) || instances.get(key) != null;
+                boolean running = (key.equals(homeSector) && home != null && home.loaded) || instances.get(key) != null;
                 int players = key.equals(homeSector) ? homePlayers : (instances.get(key) == null ? 0 : instances.get(key).players);
                 boolean captured = info != null && info.hasCore && !info.waves && !info.attack;
 
@@ -1134,6 +1179,7 @@ public class Coordinator{
             out.home = true;
             out.steamHost = waitSteamHost();
             out.steamId = SteamSupport.steamId();
+            consumeLanding(req);
             return landJson(out);
         }
 
@@ -1168,11 +1214,7 @@ public class Coordinator{
         }
 
         //consume the launch source even when the target sector was already running
-        if(req.accelerator && req.fromId >= 0 && req.tileX >= 0 && req.tileY >= 0){
-            consumeAccelerator(req.fromPlanet, req.fromId, req.tileX, req.tileY);
-        }else if(!req.cost.isEmpty() && req.fromId >= 0){
-            deductLaunch(req.fromPlanet, req.fromId, req.cost);
-        }
+        consumeLanding(req);
 
         if(config.steam){
             for(int i = 0; i < 40 && inst.steamHost.isEmpty(); i++){
@@ -1211,6 +1253,15 @@ public class Coordinator{
             }
         }
         return steamHost();
+    }
+
+    /** Removes the accelerator / launch cost from the sector the player is leaving. */
+    private void consumeLanding(LandRequest req){
+        if(req.accelerator && req.fromId >= 0 && req.tileX >= 0 && req.tileY >= 0){
+            consumeAccelerator(req.fromPlanet, req.fromId, req.tileX, req.tileY);
+        }else if(req.cost != null && !req.cost.isEmpty() && req.fromId >= 0){
+            deductLaunch(req.fromPlanet, req.fromId, req.cost);
+        }
     }
 
     /** Removes the loadout cost from the launch source: live for the home, via a request file for instances. */
@@ -1332,7 +1383,7 @@ public class Coordinator{
             }
         }
 
-        if(home != null && home.loaded && home.sector() != null){
+        if(home != null && home.loaded && home.sector() != null && home.sector().planet.name.equals(req.planet)){
             home.sector().info.destination = sector;
         }
 
@@ -1577,7 +1628,11 @@ public class Coordinator{
                 case '\n' -> out.append("\\n");
                 case '\r' -> out.append("\\r");
                 case '\t' -> out.append("\\t");
-                default -> out.append(c);
+                default -> {
+                    //JSON strings cannot contain raw control characters
+                    if(c < 0x20) out.append(String.format("\\u%04x", (int)c));
+                    else out.append(c);
+                }
             }
         }
         return out.toString();

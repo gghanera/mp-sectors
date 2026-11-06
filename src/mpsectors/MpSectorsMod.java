@@ -24,6 +24,7 @@ import mindustry.gen.Groups;
 import mindustry.gen.Player;
 import mindustry.io.JsonIO;
 import mindustry.mod.Mod;
+import mindustry.net.Packets.KickReason;
 import mindustry.server.ServerControl;
 import mindustry.type.Planet;
 import mindustry.type.Sector;
@@ -98,6 +99,24 @@ public class MpSectorsMod extends Mod{
             Relay.chat(chatPort, key, name, message);
         });
         Events.on(WorldLoadEvent.class, e -> {
+            if(coordinator != null){
+                //the vanilla game-over handler rotates a dedicated server to a built-in map;
+                //the coordinator must never serve that map instead of the campaign home
+                if(Vars.state.getSector() == null){
+                    Log.err("[mp-sectors] coordinator loaded a non-campaign map; closing the game server");
+                    for(Player player : Groups.player.copy()){
+                        player.kick(KickReason.serverRestarting);
+                    }
+                    Vars.state.set(GameState.State.menu);
+                    try{
+                        Vars.net.closeServer();
+                    }catch(Throwable t){
+                        Log.err("[mp-sectors] could not close the game server", t);
+                    }
+                }
+                return;
+            }
+
             if(!instanceMode || runner == null || !runner.loaded) return;
             Sector now = Vars.state.getSector();
             if(now != null && now != runner.sector()){
@@ -314,23 +333,37 @@ public class MpSectorsMod extends Mod{
         if(ServerControl.instance == null) return;
 
         ServerControl.instance.gameOverListener = e -> {
-            Log.info("[mp-sectors] game over: campaign=@ cores=@ wave=@/@ enemies=@ attack=@",
-                Vars.state.isCampaign(), Vars.state.teams.playerCores().size, Vars.state.wave,
+            boolean won = e != null && Vars.state.rules != null && e.winner == Vars.state.rules.defaultTeam;
+            Log.info("[mp-sectors] game over: won=@ campaign=@ cores=@ wave=@/@ enemies=@ attack=@",
+                won, Vars.state.isCampaign(), Vars.state.teams.playerCores().size, Vars.state.wave,
                 Vars.state.rules.winWave, Vars.state.enemies, Vars.state.rules.attackMode);
 
             if(coordinator != null){
-                Log.info("[mp-sectors] home sector lost, saving and marking it unowned");
-                coordinator.homeLost();
+                if(won){
+                    Log.info("[mp-sectors] home sector captured, saving it");
+                    coordinator.homeCaptured();
+                }else{
+                    Log.info("[mp-sectors] home sector lost, saving and marking it unowned");
+                    coordinator.homeLost();
+                }
                 return;
             }
 
             if(runner == null || !runner.loaded) return;
 
-            Log.info("[mp-sectors] sector @ lost, saving and stopping", runner.sectorName);
-            runner.save();
-            runner.markLost();
-            runner.loaded = false;
-            Relay.history(chatPort, "lost", runner.sectorName, "", "Сектор потерян");
+            if(won){
+                Log.info("[mp-sectors] sector @ captured, saving and stopping", runner.sectorName);
+                runner.save();
+                runner.markCaptured();
+                runner.loaded = false;
+                Relay.history(chatPort, "capture", runner.sectorName, "", "Сектор захвачен");
+            }else{
+                Log.info("[mp-sectors] sector @ lost, saving and stopping", runner.sectorName);
+                runner.save();
+                runner.markLost();
+                runner.loaded = false;
+                Relay.history(chatPort, "lost", runner.sectorName, "", "Сектор потерян");
+            }
             if(instanceMode) Core.app.exit();
         };
     }

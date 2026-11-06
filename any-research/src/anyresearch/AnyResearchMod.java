@@ -83,8 +83,8 @@ public class AnyResearchMod extends Mod{
                 if(hit == null) return false;
 
                 TechNode node = (TechNode)hit.userObject;
-                //already researched on this server - leave the stock behaviour alone
-                if(node.content.unlockedHost()) return true;
+                //already researched on this server - let the stock click handler show its info
+                if(node.content.unlockedHost()) return false;
 
                 Log.info("[any-research] requesting @ from the server.", node.content.name);
                 Call.sendChatMessage("/anyresearch " + TOKEN + " " + node.content.name);
@@ -251,6 +251,7 @@ public class AnyResearchMod extends Mod{
         }
 
         content.unlock();
+        if(Vars.state.rules != null) Vars.state.rules.researched.add(content);
         reply(player, "[accent]Исследовано: [white]" + label(content)
             + (spent.isEmpty() ? "" : " [lightgray](списано: " + spent + ")"));
         Log.info("[any-research] researched @ (spent: @)", content.name, spent.isEmpty() ? "-" : spent);
@@ -300,7 +301,15 @@ public class AnyResearchMod extends Mod{
                 if(remaining <= 0) break;
                 int take = Math.min(Math.max(sector.items().get(req.item), 0), remaining);
                 if(take > 0){
-                    sector.removeItem(req.item, take);
+                    //a dedicated server has no SaveSlot, so Sector.hasBase() is false there;
+                    //write the stored SectorInfo directly for sectors that are not being played
+                    if(sector.isBeingPlayed()){
+                        sector.removeItem(req.item, take);
+                    }else{
+                        sector.info.items.add(req.item, -take);
+                        sector.info.items.checkNegative();
+                        sector.saveInfo();
+                    }
                     remaining -= take;
                 }
             }
@@ -340,7 +349,7 @@ public class AnyResearchMod extends Mod{
         for(Planet planet : Vars.content.planets()){
             if(planet.techTree != root) continue;
             for(Sector sector : planet.sectors){
-                if(!sector.hasBase() || sector.isFrozen()) continue;
+                if(sector.info == null || !sector.info.hasCore || sector.isFrozen()) continue;
                 if(sector == current){
                     currentAdded = true;
                     continue;
