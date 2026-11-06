@@ -38,6 +38,7 @@ import mindustry.type.ItemSeq;
 import mindustry.type.Planet;
 import mindustry.type.Sector;
 import mindustry.ui.dialogs.PlanetDialog;
+import mindustry.world.blocks.LaunchAnimator;
 import mindustry.world.blocks.campaign.Accelerator;
 import mindustry.world.blocks.storage.CoreBlock;
 
@@ -56,12 +57,14 @@ public class MpCampaignMod extends Mod{
     public static final String defaultUrl = "http://127.0.0.1:8090";
 
     public static class Entry{
-        public String planet = "", name = "", info;
+        public String planet = "", name = "", title = "", note = "", info;
         public int id, players;
         public boolean hasBase, captured, attacked, allowed, running;
+        public SectorInfo parsed;
     }
 
     public static final ObjectMap<String, Entry> entries = new ObjectMap<>();
+    public static final arc.struct.ObjectSet<String> moderators = new arc.struct.ObjectSet<>();
     public static final ObjectMap<Sector, SectorInfo> originalInfo = new ObjectMap<>();
     private static final ObjectMap<UnlockableContent, Boolean> originalUnlocked = new ObjectMap<>();
     private static java.lang.reflect.Field unlockedField;
@@ -87,6 +90,10 @@ public class MpCampaignMod extends Mod{
     private static float serverSpeed = 1f, pendingSpeed = 1f;
     private static long pendingSince;
     private static boolean serverSpeedPending;
+
+    //cross-sector chat: the coordinator keeps a buffer, every client polls what it has not seen
+    private static long lastChatId, lastChatPoll;
+    private static boolean chatPending;
 
     @Override
     public void init(){
@@ -168,19 +175,20 @@ public class MpCampaignMod extends Mod{
         }
 
         if(!Vars.headless && Vars.state.isGame() && Vars.player != null
-            && Vars.player.plainName().equalsIgnoreCase("GGhanera")
+            && isModerator()
             && !Core.scene.hasField() && Core.input.keyTap(KeyCode.space)){
             Call.sendChatMessage("/pause");
         }
 
         if(!Vars.headless && Vars.player != null
-            && Vars.player.plainName().equalsIgnoreCase("GGhanera")
+            && isModerator()
             && !Core.scene.hasField() && Core.input.ctrl() && Core.input.keyTap(KeyCode.s)
             && ((Vars.net != null && Vars.net.client()) || ServerProcess.running())){
             saveSnapshot();
         }
 
         updateTimeControl();
+        pollChat();
 
         if(ServerProcess.running()){
             ServerProcess.refreshStatus();
@@ -194,7 +202,7 @@ public class MpCampaignMod extends Mod{
         if(serverSpeedPending && Vars.player != null){
             serverSpeedPending = false;
             //the owner keeps the speed picked in Time Control; everyone else follows the server
-            if(!isOwner() || Math.abs(currentSpeed() - 1f) <= 0.02f){
+            if(!isModerator() || Math.abs(currentSpeed() - 1f) <= 0.02f){
                 setClientSpeed(serverSpeed);
             }
         }
@@ -202,7 +210,7 @@ public class MpCampaignMod extends Mod{
         float ratio = currentSpeed();
         if(!Float.isFinite(ratio) || ratio <= 0f) return;
 
-        if(!isOwner()){
+        if(!isModerator()){
             if(Math.abs(ratio - serverSpeed) > 0.02f) setClientSpeed(serverSpeed);
             return;
         }
@@ -222,8 +230,16 @@ public class MpCampaignMod extends Mod{
         if(requested != pendingSpeed) setClientSpeed(requested);
     }
 
-    private static boolean isOwner(){
-        return Vars.player != null && Vars.player.plainName().equalsIgnoreCase("GGhanera");
+    private static boolean isModerator(){
+        if(Vars.player == null) return false;
+
+        String name = Vars.player.plainName();
+        if(moderators.isEmpty()) return name.equalsIgnoreCase("GGhanera");
+
+        for(String moderator : moderators){
+            if(moderator.equalsIgnoreCase(name)) return true;
+        }
+        return false;
     }
 
     /** Effective multiplier Time Control put into the client-side delta. */
@@ -252,7 +268,7 @@ public class MpCampaignMod extends Mod{
     /** The vanilla pause menu disables "abandon" for clients; the owner may use it in the campaign. */
     private static void fixAbandonButton(){
         if(Vars.headless || Vars.net == null || !Vars.net.client() || !Vars.state.isCampaign()) return;
-        if(!isOwner()) return;
+        if(!isModerator()) return;
 
         TextButton button = findButton(Vars.ui.paused.cont, Core.bundle.get("abandon"));
         if(button == null) return;
@@ -321,23 +337,14 @@ public class MpCampaignMod extends Mod{
     }
 
     public static void openSnapshots(){
-        if(Vars.player == null || !Vars.player.plainName().equalsIgnoreCase("GGhanera")){
-            Vars.ui.showInfoFade("[scarlet]Снимки кампании доступны только GGhanera.");
-            return;
-        }
         if(snapshotDialog == null) snapshotDialog = new SnapshotDialog();
         snapshotDialog.show();
     }
 
     /** Creates a campaign snapshot now (button in the snapshot dialog and Ctrl+S). */
     public static void saveSnapshot(){
-        if(Vars.player == null || !Vars.player.plainName().equalsIgnoreCase("GGhanera")){
-            Vars.ui.showInfoFade("[scarlet]Снимки кампании доступны только GGhanera.");
-            return;
-        }
-
         Jval body = Jval.newObject();
-        body.add("player", Vars.player.plainName());
+        body.add("player", Vars.player == null ? "" : Vars.player.plainName());
 
         Http.post(url() + "/snapshot", body, json -> {
             if(json != null && bool(json, "ok")){
@@ -403,6 +410,15 @@ public class MpCampaignMod extends Mod{
         players = num(root, "players", 0);
 
         entries.clear();
+        moderators.clear();
+
+        Jval mods = root.get("moderators");
+        if(mods != null && mods.isArray()){
+            for(Jval value : mods.asArray()){
+                String name = value.asString();
+                if(name != null && !name.isEmpty()) moderators.add(name);
+            }
+        }
 
         Jval array = root.get("sectors");
         if(array == null || !array.isArray()) return;
@@ -412,6 +428,8 @@ public class MpCampaignMod extends Mod{
             entry.planet = str(value, "planet");
             entry.id = num(value, "id", -1);
             entry.name = str(value, "name");
+            entry.title = str(value, "title");
+            entry.note = str(value, "note");
             entry.hasBase = bool(value, "hasBase");
             entry.captured = bool(value, "captured");
             entry.attacked = bool(value, "attacked");
@@ -450,6 +468,7 @@ public class MpCampaignMod extends Mod{
                 }
             }
             if(info == null) info = new SectorInfo();
+            entry.parsed = info;
 
             //stops PlanetDialog.show() from writing synced data into the client's own settings
             info.shown = true;
@@ -553,13 +572,31 @@ public class MpCampaignMod extends Mod{
             }
         }
 
+        //normal landing: play the vanilla core launch animation, like the accelerator does
+        CoreBlock.CoreBuild core = Vars.player == null ? null : Vars.player.bestCore();
+        boolean animate = core != null && from != null && from != sector && !Core.settings.getBool("skipcoreanimation");
+
+        if(animate){
+            Call.serverPacketReliable(acceleratorPacket, core.tileX() + "," + core.tileY());
+            try{
+                Vars.renderer.showLaunch(core);
+            }catch(Throwable t){
+                Log.err("[mp-campaign] could not play the launch animation", t);
+            }
+        }
+
         Vars.ui.loadfrag.show("@connecting");
 
         Http.post(url() + "/land", body, response -> {
             Vars.ui.loadfrag.hide();
 
             if(response != null && bool(response, "ok")){
-                connectFrom(response);
+                //keep the launch visible until it ends, then connect
+                if(animate && Vars.renderer != null && Vars.renderer.isLaunching() && Vars.renderer.getLandTime() > 0f){
+                    Time.runTask(Vars.renderer.getLandTime(), () -> connectFrom(response));
+                }else{
+                    connectFrom(response);
+                }
             }else{
                 String error = response == null ? "Координатор недоступен." : str(response, "error");
                 Vars.ui.showInfoFade("[scarlet]" + (error.isEmpty() ? "Не удалось высадиться." : error));
@@ -686,8 +723,8 @@ public class MpCampaignMod extends Mod{
         try{
             int x = Integer.parseInt(parts[0].trim());
             int y = Integer.parseInt(parts[1].trim());
-            if(Vars.world.build(x, y) instanceof Accelerator.AcceleratorBuild build){
-                Vars.renderer.showLaunch(build);
+            if(Vars.world.build(x, y) instanceof LaunchAnimator animator){
+                Vars.renderer.showLaunch(animator);
             }
         }catch(NumberFormatException ignored){
         }
@@ -799,6 +836,90 @@ public class MpCampaignMod extends Mod{
                 Vars.ui.showInfoFade("[scarlet]" + (error.isEmpty() ? "Не удалось направить площадки." : error));
             }
         });
+    }
+
+    /** Saves the player's own name and note for a sector. */
+    public static void saveNote(Sector sector, String title, String note){
+        if(sector == null) return;
+
+        Jval body = Jval.newObject();
+        body.add("planet", sector.planet.name);
+        body.add("id", Jval.valueOf(sector.id));
+        body.add("player", Vars.player == null ? "" : Vars.player.plainName());
+        body.add("title", title == null ? "" : title);
+        body.add("note", note == null ? "" : note);
+
+        Http.post(url() + "/note", body, response -> {
+            if(response != null && bool(response, "ok")){
+                Vars.ui.showInfoFade("[accent]Название и заметка сохранены.");
+                refresh(null);
+            }else{
+                String error = response == null ? "Координатор недоступен." : str(response, "error");
+                Vars.ui.showInfoFade("[scarlet]" + (error.isEmpty() ? "Не удалось сохранить заметку." : error));
+            }
+        });
+    }
+
+    public static String displayName(Entry entry){
+        if(entry == null) return "";
+        return entry.title == null || entry.title.isEmpty() ? entry.name : entry.title;
+    }
+
+    /** Polls the coordinator for chat from the other sectors and adds it to the vanilla chat. */
+    private static void pollChat(){
+        if(Vars.headless || Vars.net == null || !Vars.net.client() || !Vars.state.isGame() || !Vars.state.isCampaign()) return;
+
+        long now = System.currentTimeMillis();
+        if(chatPending || now - lastChatPoll < 2000L) return;
+        lastChatPoll = now;
+        chatPending = true;
+
+        Http.get(url() + "/chat?since=" + lastChatId, json -> {
+            chatPending = false;
+            if(json == null){
+                //coordinator offline: retry slowly instead of logging an error twice a second
+                lastChatPoll = System.currentTimeMillis() + 8000L;
+                return;
+            }
+
+            long next = numLong(json, "next", lastChatId);
+            //the coordinator restarted and its ids start over
+            if(next < lastChatId) lastChatId = next;
+
+            Jval array = json.get("messages");
+            if(array != null && array.isArray()){
+                String own = currentSectorKey();
+
+                for(Jval value : array.asArray()){
+                    long id = numLong(value, "id", 0);
+                    if(id > lastChatId) lastChatId = id;
+
+                    String sector = str(value, "sector");
+                    if(sector.equals(own)) continue; //the vanilla chat already showed this line
+
+                    String player = str(value, "player");
+                    String message = str(value, "message");
+                    if(message.isEmpty()) continue;
+
+                    Vars.ui.chatfrag.addMessage("[orange][" + sectorLabel(sector) + "][white] " + player + ": [lightgray]" + message);
+                }
+            }
+
+            if(next > lastChatId) lastChatId = next;
+        });
+    }
+
+    private static String currentSectorKey(){
+        Sector sector = Vars.state.getSector();
+        return sector == null ? "" : sector.planet.name + "-" + sector.id;
+    }
+
+    private static String sectorLabel(String key){
+        Entry entry = entries.get(key);
+        if(entry == null) return key;
+
+        String name = displayName(entry);
+        return name == null || name.isEmpty() ? key : name;
     }
 
     // ---------------- json helpers ----------------

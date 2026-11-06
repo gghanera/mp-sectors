@@ -8,12 +8,22 @@ import arc.graphics.Color;
 import arc.scene.event.Touchable;
 import arc.scene.ui.Dialog;
 import arc.scene.ui.layout.Table;
+import arc.util.serialization.Jval;
 import mindustry.Vars;
+import mindustry.game.SectorInfo;
 import mindustry.gen.Icon;
 import mindustry.net.Net;
+import mindustry.type.Item;
+import mindustry.type.Planet;
 import mindustry.type.Sector;
 import mindustry.ui.Styles;
+import mindustry.ui.dialogs.BaseDialog;
 import mindustry.ui.dialogs.PlanetDialog;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Date;
 
 /**
  * The campaign map for the coordinator setup.
@@ -150,6 +160,17 @@ public class LobbyDialog extends PlanetDialog{
             row.button("В лобби", Icon.home, MpCampaignMod::returnToLobby).width(140f);
         }).left().row();
 
+        panel.table(row -> {
+            row.defaults().height(36f).padRight(6f);
+            row.button("Все", Icon.map, () -> showSectorList("all")).width(90f);
+            row.button("Базы", Icon.home, () -> showSectorList("base")).width(100f);
+            row.button("Атака", Icon.warning, () -> showSectorList("attack")).width(100f);
+            row.button("Открытые", Icon.lock, () -> showSectorList("allowed")).width(130f);
+            row.button("История", Icon.list, this::showHistory).width(130f);
+        }).left().row();
+
+        panel.add("[green]■ база   [scarlet]■ атака   [lightgray]■ не открыт   [accent]■ вы здесь").left().row();
+
         panel.button("Пригласить друзей", Icon.host, MpCampaignMod::inviteFriends)
             .height(40f).growX().padTop(6f).left().row();
 
@@ -167,11 +188,15 @@ public class LobbyDialog extends PlanetDialog{
         actions.margin(10f);
 
         actions.label(this::selectedText).color(Color.lightGray).left().row();
+        actions.label(this::noteText).color(Color.lightGray).left().row();
+        actions.label(this::statsLine1).color(Color.lightGray).left().row();
+        actions.label(this::statsLine2).color(Color.lightGray).left().row();
 
         actions.table(row -> {
             row.defaults().height(54f).padRight(8f);
             row.button("Высадиться", Icon.play, () -> MpCampaignMod.land(selected)).width(200f);
             row.button("Домашний", Icon.home, () -> MpCampaignMod.setHome(selected)).width(180f);
+            row.button("Заметка", Icon.edit, this::editNote).width(160f);
         }).left().row();
 
         actions.button("Направить пусковые площадки", Icon.upOpen, () -> MpCampaignMod.setLaunchPads(selected))
@@ -194,7 +219,7 @@ public class LobbyDialog extends PlanetDialog{
 
     private String homeName(){
         MpCampaignMod.Entry entry = MpCampaignMod.entries.get(MpCampaignMod.home);
-        if(entry != null) return entry.name;
+        if(entry != null) return MpCampaignMod.displayName(entry);
         return MpCampaignMod.home.isEmpty() ? "?" : MpCampaignMod.home;
     }
 
@@ -205,12 +230,183 @@ public class LobbyDialog extends PlanetDialog{
         MpCampaignMod.Entry entry = MpCampaignMod.entry(sector);
         if(entry == null) return "[lightgray]" + sector.name();
 
-        StringBuilder out = new StringBuilder("[accent]").append(entry.name).append("[]  ");
+        StringBuilder out = new StringBuilder("[accent]").append(MpCampaignMod.displayName(entry)).append("[]  ");
         if(entry.running) out.append("[green]на сервере").append(entry.players > 0 ? " (" + entry.players + ")" : "").append("[]  ");
         if(entry.hasBase) out.append(entry.attacked ? "[scarlet]атака[]  " : "[green]база[]  ");
         if(!entry.allowed) out.append("[scarlet]не открыт[]  ");
         if(Vars.state.getSector() == sector) out.append("[lightgray]вы здесь[]");
         return out.toString();
+    }
+
+    private String noteText(){
+        MpCampaignMod.Entry entry = MpCampaignMod.entry(selected);
+        if(entry == null || entry.note == null || entry.note.isEmpty()) return "";
+        return "[lightgray]Заметка: [white]" + entry.note;
+    }
+
+    private String statsLine1(){
+        SectorInfo info = parsedInfo();
+        if(info == null) return "";
+
+        String core = info.hasCore
+            ? formatAmount(info.items.total) + (info.storageCapacity > 0 ? "/" + formatAmount(info.storageCapacity) : "")
+            : "нет ядра";
+        String wave = info.waves
+            ? "волна " + info.wave + (info.winWave > 0 ? "/" + info.winWave : "")
+            : "без волн";
+
+        return "[lightgray]Ядро: [white]" + core + "   [lightgray]" + wave;
+    }
+
+    private String statsLine2(){
+        SectorInfo info = parsedInfo();
+        if(info == null) return "";
+
+        return "[lightgray]Добыча: [white]+" + Math.round(sum(info.production) * 60f) + "/мин"
+            + "   [lightgray]Импорт: [white]+" + Math.round(sum(info.imports) * 60f) + "/мин"
+            + "   [lightgray]Экспорт: [white]-" + Math.round(sum(info.export) * 60f) + "/мин";
+    }
+
+    private SectorInfo parsedInfo(){
+        MpCampaignMod.Entry entry = MpCampaignMod.entry(selected);
+        return entry == null ? null : entry.parsed;
+    }
+
+    private static float sum(arc.struct.ObjectMap<Item, SectorInfo.ExportStat> stats){
+        float total = 0f;
+        for(SectorInfo.ExportStat stat : stats.values()){
+            if(stat != null) total += stat.mean;
+        }
+        return total;
+    }
+
+    private static String formatAmount(int value){
+        if(value >= 1_000_000) return String.format("%.1fM", value / 1_000_000f);
+        if(value >= 1_000) return String.format("%.1fK", value / 1_000f);
+        return Integer.toString(value);
+    }
+
+    /** Opens a list of sectors matching a status filter; clicking one selects it on the map. */
+    private void showSectorList(String mode){
+        BaseDialog dialog = new BaseDialog("Секторы");
+
+        ArrayList<MpCampaignMod.Entry> list = new ArrayList<>();
+        for(MpCampaignMod.Entry entry : MpCampaignMod.entries.values()){
+            if(matches(entry, mode)) list.add(entry);
+        }
+        list.sort(Comparator.comparing(MpCampaignMod::displayName));
+
+        dialog.cont.pane(t -> {
+            t.top().left();
+            if(list.isEmpty()){
+                t.add("[lightgray]Нет секторов под этот фильтр.").left().row();
+                return;
+            }
+
+            for(MpCampaignMod.Entry entry : list){
+                t.table(row -> {
+                    row.left();
+                    row.add("[accent]" + MpCampaignMod.displayName(entry)).width(240f).left();
+                    row.add(statusOf(entry)).width(230f).left();
+                    row.button("Выбрать", Icon.map, () -> {
+                        dialog.hide();
+                        selected = sectorOf(entry);
+                    }).size(150f, 44f);
+                }).growX().left().padBottom(4f).row();
+            }
+        }).grow();
+
+        dialog.addCloseButton();
+        dialog.show();
+    }
+
+    private static boolean matches(MpCampaignMod.Entry entry, String mode){
+        return switch(mode){
+            case "base" -> entry.hasBase;
+            case "attack" -> entry.attacked;
+            case "allowed" -> entry.allowed;
+            default -> true;
+        };
+    }
+
+    private static String statusOf(MpCampaignMod.Entry entry){
+        if(entry.running) return "[green]на сервере" + (entry.players > 0 ? " (" + entry.players + ")" : "");
+        if(entry.attacked) return "[scarlet]атака";
+        if(entry.hasBase) return "[green]база";
+        if(entry.allowed) return "[lightgray]открыт";
+        return "[scarlet]закрыт";
+    }
+
+    private static Sector sectorOf(MpCampaignMod.Entry entry){
+        Planet planet = Vars.content.getByName(mindustry.ctype.ContentType.planet, entry.planet);
+        if(planet == null || entry.id < 0 || entry.id >= planet.sectors.size) return null;
+        return planet.sectors.get(entry.id);
+    }
+
+    private void editNote(){
+        Sector sector = selected;
+        if(sector == null){
+            Vars.ui.showInfoFade("[scarlet]Сначала выберите сектор на карте.");
+            return;
+        }
+
+        MpCampaignMod.Entry entry = MpCampaignMod.entry(sector);
+        String[] title = {entry == null || entry.title == null ? "" : entry.title};
+        String[] note = {entry == null || entry.note == null ? "" : entry.note};
+
+        BaseDialog dialog = new BaseDialog("Название и заметка");
+        dialog.cont.table(t -> {
+            t.defaults().left().padBottom(6f);
+            t.add("[lightgray]Название сектора").left().row();
+            t.field(title[0], value -> title[0] = value).width(420f).row();
+            t.add("[lightgray]Заметка").left().row();
+            t.area(note[0], value -> note[0] = value).width(420f).height(120f).row();
+        }).left();
+
+        dialog.buttons.button("Сохранить", Icon.ok, () -> {
+            dialog.hide();
+            MpCampaignMod.saveNote(sector, title[0], note[0]);
+        }).size(180f, 50f);
+        dialog.buttons.button("Отмена", dialog::hide).size(140f, 50f);
+        dialog.show();
+    }
+
+    private void showHistory(){
+        BaseDialog dialog = new BaseDialog("История кампании");
+
+        Table list = new Table();
+        list.top().left();
+        list.add("[lightgray]Загрузка...").left().row();
+
+        dialog.cont.pane(list).grow();
+
+        Http.get(MpCampaignMod.url() + "/history", json -> {
+            list.clear();
+            if(json == null){
+                list.add("[scarlet]Координатор недоступен.").left().row();
+                return;
+            }
+
+            Jval array = json.get("events");
+            if(array == null || !array.isArray() || array.asArray().isEmpty()){
+                list.add("[lightgray]Событий пока нет.").left().row();
+                return;
+            }
+
+            SimpleDateFormat format = new SimpleDateFormat("dd.MM HH:mm");
+            for(Jval value : array.asArray()){
+                String text = MpCampaignMod.str(value, "text");
+                String sector = MpCampaignMod.str(value, "sector");
+                long time = MpCampaignMod.numLong(value, "time", 0);
+
+                String line = "[lightgray]" + format.format(new Date(time)) + "  [white]" + text;
+                if(!sector.isEmpty()) line += " [lightgray](" + sector + ")";
+                list.add(line).left().padBottom(2f).row();
+            }
+        });
+
+        dialog.addCloseButton();
+        dialog.show();
     }
 
     private void editUrl(){

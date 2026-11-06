@@ -14,6 +14,7 @@ import mindustry.ctype.MappableContent;
 import mindustry.ctype.UnlockableContent;
 import mindustry.game.EventType.PlayerConnect;
 import mindustry.game.EventType.PlayerLeave;
+import mindustry.game.EventType.PlayerChatEvent;
 import mindustry.game.EventType.ServerLoadEvent;
 import mindustry.game.EventType.Trigger;
 import mindustry.game.EventType.UnlockEvent;
@@ -26,7 +27,7 @@ import mindustry.mod.Mod;
 import mindustry.server.ServerControl;
 import mindustry.type.Planet;
 import mindustry.type.Sector;
-import mindustry.world.blocks.campaign.Accelerator;
+import mindustry.world.blocks.LaunchAnimator;
 
 /**
  * MP Sectors - one campaign sector per server process.
@@ -45,6 +46,10 @@ public class MpSectorsMod extends Mod{
 
     private Fi stopFile;
     private boolean instanceMode;
+    private int chatPort;
+    private String chatSector = "";
+    private String lastChatPlayer = "", lastChatMessage = "";
+    private long lastChatTime;
     private long lastAutosave, lastStopCheck, lastStatus;
     private long lastUnlockCheck, lastUnlocksModified;
     private long lastImportRefresh, lastPadsPoll, lastPadsCheck, lastLaunchPoll;
@@ -66,6 +71,24 @@ public class MpSectorsMod extends Mod{
         });
         Events.on(PlayerLeave.class, e -> {
             if(instanceMode && runner != null && runner.loaded && Groups.player.size() == 0) runner.save();
+        });
+        Events.on(PlayerChatEvent.class, e -> {
+            if(e.player == null || e.message == null || e.message.isEmpty()) return;
+
+            //commands are not chat; the event fires before command handling
+            if(e.message.startsWith("/")) return;
+
+            //a graphical host can fire this twice for one message
+            long now = System.currentTimeMillis();
+            String name = e.player.plainName();
+            if(name.equals(lastChatPlayer) && e.message.equals(lastChatMessage) && now - lastChatTime < 1000L) return;
+            lastChatPlayer = name;
+            lastChatMessage = e.message;
+            lastChatTime = now;
+
+            Sector sector = Vars.state.getSector();
+            String key = sector != null ? sector.planet.name + "-" + sector.id : chatSector;
+            Relay.chat(chatPort, key, name, e.message);
         });
         Events.on(WorldLoadEvent.class, e -> {
             if(!instanceMode || runner == null || !runner.loaded) return;
@@ -118,16 +141,41 @@ public class MpSectorsMod extends Mod{
         });
 
         handler.register("abandon", "Abandon the current campaign sector.", args -> abandonSector());
+
+        handler.register("mpmod", "[add|remove|list] [name]", "Manage campaign moderators.", args -> {
+            if(args.length == 0 || args[0].equalsIgnoreCase("list")){
+                Log.info("[mp-sectors] moderators: @", String.join(", ", Moderators.list()));
+                return;
+            }
+
+            if(args.length < 2){
+                Log.err("[mp-sectors] usage: mpmod add|remove <player>");
+                return;
+            }
+
+            if(args[0].equalsIgnoreCase("add")){
+                Log.info("[mp-sectors] @ is now a moderator.", args[1]);
+                if(!Moderators.add(args[1])) Log.info("[mp-sectors] @ was already a moderator.", args[1]);
+            }else if(args[0].equalsIgnoreCase("remove")){
+                if(Moderators.remove(args[1])){
+                    Log.info("[mp-sectors] @ is no longer a moderator.", args[1]);
+                }else{
+                    Log.err("[mp-sectors] @ is not a moderator.", args[1]);
+                }
+            }else{
+                Log.err("[mp-sectors] usage: mpmod add|remove|list [player]");
+            }
+        });
     }
 
     @Override
     public void registerClientCommands(arc.util.CommandHandler handler){
         //server half of Any Research: guests cannot research on a dedicated server otherwise
         ResearchServer.register(handler);
-        handler.<Player>register("pause", "Поставить или снять паузу (только GGhanera).", (args, player) -> togglePause(player));
-        handler.<Player>register("speed", "<x>", "Скорость игры: 4, 0.5 и т.д. (только GGhanera).", (args, player) -> {
-            if(player != null && !player.plainName().equalsIgnoreCase("GGhanera")){
-                player.sendMessage("[scarlet]Только GGhanera может менять скорость игры.");
+        handler.<Player>register("pause", "Поставить или снять паузу (модераторы).", (args, player) -> togglePause(player));
+        handler.<Player>register("speed", "<x>", "Скорость игры: 4, 0.5 и т.д. (модераторы).", (args, player) -> {
+            if(player != null && !Moderators.isModerator(player.plainName())){
+                player.sendMessage("[scarlet]Только модераторы могут менять скорость игры.");
                 return;
             }
             try{
@@ -137,9 +185,9 @@ public class MpSectorsMod extends Mod{
             }
         });
 
-        handler.<Player>register("abandon", "Покинуть сектор (только GGhanera).", (args, player) -> {
-            if(player != null && !player.plainName().equalsIgnoreCase("GGhanera")){
-                player.sendMessage("[scarlet]Только GGhanera может покинуть сектор.");
+        handler.<Player>register("abandon", "Покинуть сектор (модераторы).", (args, player) -> {
+            if(player != null && !Moderators.isModerator(player.plainName())){
+                player.sendMessage("[scarlet]Только модераторы могут покинуть сектор.");
                 return;
             }
             abandonSector();
@@ -165,7 +213,7 @@ public class MpSectorsMod extends Mod{
         for(var core : cores) core.kill();
     }
 
-    /** Plays the vanilla accelerator launch animation for every client in this sector. */
+    /** Plays the vanilla launch animation for every client in this sector. */
     private void handleAcceleratorPacket(Player player, String data){
         String[] parts = data.split(",");
         if(parts.length != 2) return;
@@ -174,7 +222,8 @@ public class MpSectorsMod extends Mod{
             int x = Integer.parseInt(parts[0].trim());
             int y = Integer.parseInt(parts[1].trim());
 
-            if(!(Vars.world.build(x, y) instanceof Accelerator.AcceleratorBuild)) return;
+            //cores launch from the map, accelerators from their block: both are LaunchAnimators
+            if(!(Vars.world.build(x, y) instanceof LaunchAnimator)) return;
             Call.clientPacketReliable(acceleratorAnimPacket, x + "," + y);
         }catch(NumberFormatException ignored){
         }
@@ -184,8 +233,8 @@ public class MpSectorsMod extends Mod{
     private void handleSpeedPacket(Player player, String data){
         if(player == null) return;
 
-        if(!player.plainName().equalsIgnoreCase("GGhanera")){
-            player.sendMessage("[scarlet]Только GGhanera может менять скорость игры.");
+        if(!Moderators.isModerator(player.plainName())){
+            player.sendMessage("[scarlet]Только модераторы могут менять скорость игры.");
             Call.clientPacketReliable(player.con, speedPacket, Float.toString(gameSpeed));
             return;
         }
@@ -215,8 +264,8 @@ public class MpSectorsMod extends Mod{
     }
 
     private void togglePause(@arc.util.Nullable Player player){
-        if(player != null && !player.plainName().equalsIgnoreCase("GGhanera")){
-            player.sendMessage("[scarlet]Только GGhanera может ставить паузу.");
+        if(player != null && !Moderators.isModerator(player.plainName())){
+            player.sendMessage("[scarlet]Только модераторы могут ставить паузу.");
             return;
         }
 
@@ -239,7 +288,10 @@ public class MpSectorsMod extends Mod{
                 if(config != null){
                     installGameOverListener();
                     coordinator = new Coordinator(config);
+                    chatPort = config.httpPort;
                     coordinator.start();
+                    Sector home = Vars.state.getSector();
+                    chatSector = home == null ? "" : home.planet.name + "-" + home.id;
                     return;
                 }
             }catch(Throwable t){
@@ -271,6 +323,7 @@ public class MpSectorsMod extends Mod{
             runner.save();
             runner.markLost();
             runner.loaded = false;
+            Relay.history(chatPort, "lost", runner.sectorName, "", "Сектор потерян");
             if(instanceMode) Core.app.exit();
         };
     }
@@ -294,6 +347,9 @@ public class MpSectorsMod extends Mod{
             }
 
             ResearchServer.campaignPath = instanceConfig.campaign;
+            Moderators.init(Core.files.absolute(instanceConfig.campaign));
+            chatPort = instanceConfig.httpPort;
+            chatSector = instanceConfig.sector;
             runner = new SectorRunner(instanceConfig.campaign, instanceConfig.sector);
             runner.loadout = instanceConfig.loadout;
             runner.resources = instanceConfig.resources;

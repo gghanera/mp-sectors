@@ -11,7 +11,7 @@ main: "mpsectors.MpSectorsMod"
 
 description: "Runs one campaign sector per server instance, with a shared campaign folder (sector saves, sector info, research). Server-side only. Part of the multi-sector campaign setup."
 
-version: "0.2.0"
+version: "0.3.0"
 
 #minimum game build required
 minGameVersion: 160

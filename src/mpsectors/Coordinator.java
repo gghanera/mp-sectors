@@ -5,6 +5,7 @@ import arc.files.Fi;
 import arc.struct.ObjectMap;
 import arc.util.Log;
 import arc.util.Nullable;
+import arc.util.serialization.Jval;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import mindustry.Vars;
@@ -136,6 +137,27 @@ public class Coordinator{
         public String player = "";
     }
 
+    /** One chat line relayed between the sector servers. */
+    public static class ChatMessage{
+        public long id, time;
+        public String player = "", sector = "", message = "";
+    }
+
+    public static class ChatPost{
+        public String player = "", sector = "", message = "";
+    }
+
+    /** One line of the campaign log shown on the map. */
+    public static class HistoryEvent{
+        public long time;
+        public String type = "", sector = "", player = "", text = "";
+    }
+
+    public static class NoteRequest{
+        public String planet = "", player = "", title = "", note = "";
+        public int id = -1;
+    }
+
     public static class StatusResponse{
         public String home;
         public int players, sectors, maxSectors, maxPlayers;
@@ -157,10 +179,24 @@ public class Coordinator{
     private ExecutorService httpExecutor;
     private boolean shuttingDown;
     private Fi snapshotsDir;
+    private Fi dailyDir;
     private volatile boolean restoring;
     private long lastSnapshot;
     private static final int maxSnapshots = 50;
+    private static final int maxDailySnapshots = 7;
     private static final long snapshotInterval = 10 * 60 * 1000L;
+
+    //cross-sector chat: a small ring buffer, polled by the clients of every sector
+    private final ArrayList<ChatMessage> chat = new ArrayList<>();
+    private long chatId;
+    private static final int maxChatMessages = 200;
+
+    //campaign log and per-sector names/notes
+    private final ArrayList<HistoryEvent> history = new ArrayList<>();
+    private static final int maxHistoryEvents = 300;
+    private final ObjectMap<String, Boolean> captured = new ObjectMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Boolean> validSnapshots = new java.util.concurrent.ConcurrentHashMap<>();
+    private Fi historyFile, notesFile;
 
     public Coordinator(Config config){
         this.config = config;
@@ -218,7 +254,15 @@ public class Coordinator{
                 ? campaign.parent().child("backups")
                 : Core.files.absolute(config.snapshotDir);
             snapshotsDir.mkdirs();
+            dailyDir = snapshotsDir.child("daily");
+            dailyDir.mkdirs();
             lastSnapshot = System.currentTimeMillis();
+
+            Moderators.init(campaign);
+            historyFile = campaign.child("history.json");
+            notesFile = campaign.child("notes.json");
+            loadHistory();
+            checkSnapshotsAsync();
 
             startHttp();
             Log.info("[mp-sectors] coordinator ready: home=@ game=@ http=@ duplicates=@", homeSector, config.gamePort, config.httpPort, config.allowDuplicateClients ? "allowed" : "blocked");
@@ -278,20 +322,29 @@ public class Coordinator{
 
     // ---------------- campaign snapshots ----------------
 
-    /** Copies the whole campaign into backups/<timestamp>, keeping the newest 30. */
+    /** Copies the whole campaign into backups/<timestamp>, keeping the newest 50 plus 7 daily. */
     private void takeSnapshot(){
-        if(restoring || snapshotsDir == null) return;
+        takeSnapshot("");
+    }
+
+    /** @param prefix empty for a regular snapshot, "before-restore_" for the safety copy. */
+    private void takeSnapshot(String prefix){
+        if(snapshotsDir == null) return;
 
         synchronized(campaignLock){
             try{
                 snapshotsDir.mkdirs();
+                dailyDir.mkdirs();
 
                 //build into a temp name: /snapshots must never list a half-copied campaign
                 for(Fi old : snapshotsDir.list()){
                     if(old.isDirectory() && old.name().startsWith("tmp-")) old.deleteDirectory();
                 }
+                for(Fi old : dailyDir.list()){
+                    if(old.isDirectory() && old.name().startsWith("tmp-")) old.deleteDirectory();
+                }
 
-                Fi dir = snapshotsDir.child(snapshotName());
+                Fi dir = snapshotsDir.child(prefix + snapshotName());
                 if(dir.exists()) dir.deleteDirectory();
 
                 Fi tmp = snapshotsDir.child("tmp-" + dir.name());
@@ -300,6 +353,19 @@ public class Coordinator{
 
                 pruneSnapshots();
 
+                //one snapshot per day, kept for a week: "go back to yesterday" without scrolling
+                String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+                Fi daily = dailyDir.child(today);
+                if(!daily.exists()){
+                    Fi dailyTmp = dailyDir.child("tmp-" + today);
+                    dailyTmp.deleteDirectory();
+                    copyTree(campaign, dailyTmp);
+                    dailyTmp.moveTo(daily);
+                    pruneDaily();
+                    Log.info("[mp-sectors] daily snapshot @ created", today);
+                }
+
+                addHistory("snapshot", "", "", prefix.isEmpty() ? "Снимок " + dir.name() : "Страховочный снимок " + dir.name());
                 Log.info("[mp-sectors] campaign snapshot @ created", dir.name());
             }catch(Throwable t){
                 Log.err("[mp-sectors] could not create a campaign snapshot", t);
@@ -314,22 +380,31 @@ public class Coordinator{
         boolean first = true;
 
         for(Fi dir : snapshots()){
-            if(!first) json.append(',');
-            first = false;
-
-            json.append("{\"name\":\"").append(esc(dir.name())).append("\",")
-                .append("\"time\":").append(snapshotTime(dir)).append(',')
-                .append("\"size\":").append(dirSize(dir)).append('}');
+            first = appendSnapshot(json, dir, false, first);
+        }
+        for(Fi dir : dailySnapshots()){
+            first = appendSnapshot(json, dir, true, first);
         }
 
         return json.append("]}").toString();
     }
 
+    private boolean appendSnapshot(StringBuilder json, Fi dir, boolean daily, boolean first){
+        if(!first) json.append(',');
+        json.append("{\"name\":\"").append(esc(dir.name())).append("\",")
+            .append("\"time\":").append(snapshotTime(dir)).append(',')
+            .append("\"size\":").append(dirSize(dir)).append(',')
+            .append("\"daily\":").append(daily).append(',')
+            .append("\"beforeRestore\":").append(dir.name().startsWith("before-restore_")).append(',')
+            .append("\"valid\":").append(validSnapshotCached(dir)).append('}');
+        return false;
+    }
+
     private String snapshotJson(HttpExchange ex) throws IOException{
         LandRequest req = JsonIO.read(LandRequest.class, body(ex));
 
-        if(req == null || req.player == null || !req.player.equalsIgnoreCase("GGhanera")){
-            return "{\"ok\":false,\"error\":\"Только GGhanera может создавать снимки.\"}";
+        if(req == null || !Moderators.isModerator(req.player)){
+            return "{\"ok\":false,\"error\":\"Снимки кампании доступны только модераторам.\"}";
         }
         if(restoring){
             return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
@@ -359,19 +434,22 @@ public class Coordinator{
     private String restoreJson(HttpExchange ex) throws IOException{
         RestoreRequest req = JsonIO.read(RestoreRequest.class, body(ex));
 
-        if(req == null || req.name == null || !req.name.matches("[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}")){
+        if(req == null || req.name == null || !req.name.matches("(before-restore_)?[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2}")){
             return "{\"ok\":false,\"error\":\"Некорректное имя снимка.\"}";
         }
-        if(req.player == null || !req.player.equalsIgnoreCase("GGhanera")){
-            return "{\"ok\":false,\"error\":\"Только GGhanera может загружать снимки.\"}";
+        if(!Moderators.isModerator(req.player)){
+            return "{\"ok\":false,\"error\":\"Снимки кампании доступны только модераторам.\"}";
         }
         if(restoring){
             return "{\"ok\":false,\"error\":\"Кампания уже восстанавливается.\"}";
         }
 
-        Fi dir = snapshotsDir.child(req.name);
-        if(!dir.exists() || !dir.isDirectory()){
+        Fi dir = findSnapshot(req.name);
+        if(dir == null){
             return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+        }
+        if(!validSnapshot(dir)){
+            return "{\"ok\":false,\"error\":\"Снимок повреждён: в нём нет читаемых сохранений секторов.\"}";
         }
 
         restoring = true;
@@ -381,6 +459,12 @@ public class Coordinator{
         try{
             //instances save their sectors on stop; the snapshot is copied over them afterwards
             instances.stopAll();
+
+            //the home autosaves on a timer, so its last minute would be lost by a rollback
+            saveHomeBlocking();
+
+            //a rollback can itself be wrong; keep the state we are about to leave behind
+            takeSnapshot("before-restore_");
 
             //build the restored campaign next to the live one, then swap: a failed copy
             //must not leave a half-deleted campaign
@@ -407,6 +491,8 @@ public class Coordinator{
                 if(requests.exists()) requests.deleteDirectory();
             }
 
+            addHistory("restore", "", req.player, "Кампания восстановлена из " + req.name);
+
             CountDownLatch latch = new CountDownLatch(1);
             Core.app.post(() -> {
                 try{
@@ -426,6 +512,26 @@ public class Coordinator{
             restoring = false;
             Log.err("[mp-sectors] could not restore the campaign", t);
             return "{\"ok\":false,\"error\":\"Ошибка восстановления: " + esc(String.valueOf(t.getMessage())) + "\"}";
+        }
+    }
+
+    /** Saves the home on the game thread; restore runs on an HTTP thread, so waiting is safe. */
+    private void saveHomeBlocking(){
+        if(home == null || !home.loaded) return;
+
+        CountDownLatch latch = new CountDownLatch(1);
+        Core.app.post(() -> {
+            try{
+                if(home != null && home.loaded) home.save();
+            }finally{
+                latch.countDown();
+            }
+        });
+
+        try{
+            latch.await(15, TimeUnit.SECONDS);
+        }catch(InterruptedException e){
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -476,7 +582,21 @@ public class Coordinator{
         if(snapshotsDir == null || !snapshotsDir.exists()) return out;
 
         for(Fi file : snapshotsDir.list()){
-            if(file.isDirectory() && file.name().matches("[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}")){
+            if(file.isDirectory() && file.name().matches("(before-restore_)?[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}")){
+                out.add(file);
+            }
+        }
+
+        out.sort(Comparator.comparingLong(Coordinator::snapshotTime).reversed());
+        return out;
+    }
+
+    private ArrayList<Fi> dailySnapshots(){
+        ArrayList<Fi> out = new ArrayList<>();
+        if(dailyDir == null || !dailyDir.exists()) return out;
+
+        for(Fi file : dailyDir.list()){
+            if(file.isDirectory() && file.name().matches("[0-9]{4}-[0-9]{2}-[0-9]{2}")){
                 out.add(file);
             }
         }
@@ -485,13 +605,111 @@ public class Coordinator{
         return out;
     }
 
+    private Fi findSnapshot(String name){
+        if(snapshotsDir != null){
+            Fi dir = snapshotsDir.child(name);
+            if(dir.exists() && dir.isDirectory()) return dir;
+        }
+        if(dailyDir != null){
+            Fi dir = dailyDir.child(name);
+            if(dir.exists() && dir.isDirectory()) return dir;
+        }
+        return null;
+    }
+
     private void pruneSnapshots(){
         ArrayList<Fi> list = snapshots();
         while(list.size() > maxSnapshots){
             Fi oldest = list.remove(list.size() - 1);
             oldest.deleteDirectory();
+            validSnapshots.remove(oldest.name());
             Log.info("[mp-sectors] removed old snapshot @", oldest.name());
         }
+    }
+
+    private void pruneDaily(){
+        ArrayList<Fi> list = dailySnapshots();
+        while(list.size() > maxDailySnapshots){
+            Fi oldest = list.remove(list.size() - 1);
+            oldest.deleteDirectory();
+            validSnapshots.remove(oldest.name());
+            Log.info("[mp-sectors] removed old daily snapshot @", oldest.name());
+        }
+    }
+
+    /** Verifies every snapshot once at startup; a copy interrupted by a crash is marked unusable. */
+    private void checkSnapshotsAsync(){
+        Thread thread = new Thread(() -> {
+            try{
+                int bad = 0;
+                for(Fi dir : snapshots()){
+                    boolean valid = validSnapshot(dir);
+                    validSnapshots.put(dir.name(), valid);
+                    if(!valid) bad++;
+                }
+                for(Fi dir : dailySnapshots()){
+                    boolean valid = validSnapshot(dir);
+                    validSnapshots.put(dir.name(), valid);
+                    if(!valid) bad++;
+                }
+                Log.info("[mp-sectors] snapshot check: @ checked, @ invalid", validSnapshots.size(), bad);
+            }catch(Throwable t){
+                Log.err("[mp-sectors] snapshot check failed", t);
+            }
+        }, "mp-sectors-snapshot-check");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private boolean validSnapshotCached(Fi dir){
+        return validSnapshots.getOrDefault(dir.name(), true);
+    }
+
+    /** A snapshot is usable when it has sectors/ with at least one readable MSAV file. */
+    private static boolean validSnapshot(Fi dir){
+        Fi sectors = dir.child("sectors");
+        if(!sectors.exists() || !sectors.isDirectory()) return false;
+
+        boolean any = false;
+        for(Fi save : sectors.list()){
+            if(!save.extension().equals("msav")) continue;
+            any = true;
+            if(!validSave(save)) return false;
+        }
+        return any;
+    }
+
+    private static boolean validSave(Fi file){
+        try{
+            //the save is zlib-compressed; the MSAV magic is inside the stream
+            try(java.io.InputStream in = new java.util.zip.InflaterInputStream(file.read())){
+                byte[] magic = new byte[4];
+                if(readFully(in, magic) && isMagic(magic)) return true;
+            }
+        }catch(Throwable ignored){
+        }
+
+        //uncompressed saves start with the magic directly
+        try(java.io.InputStream in = file.read()){
+            byte[] magic = new byte[4];
+            return readFully(in, magic) && isMagic(magic);
+        }catch(Throwable t){
+            return false;
+        }
+    }
+
+    private static boolean readFully(java.io.InputStream in, byte[] bytes) throws java.io.IOException{
+        int read = 0;
+        while(read < bytes.length){
+            int count = in.read(bytes, read, bytes.length - read);
+            if(count < 0) break;
+            read += count;
+        }
+        return read == bytes.length;
+    }
+
+    private static boolean isMagic(byte[] magic){
+        return magic[0] == 'M' && magic[1] == 'S' && magic[2] == 'A' && magic[3] == 'V';
     }
 
     private static String snapshotName(){
@@ -500,8 +718,12 @@ public class Coordinator{
 
     /** The folder mtime changes when snapshots are moved between disks; the name is stable. */
     private static long snapshotTime(Fi dir){
+        String name = dir.name();
+        if(name.startsWith("before-restore_")) name = name.substring("before-restore_".length());
+
         try{
-            return new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").parse(dir.name()).getTime();
+            String pattern = name.length() == 10 ? "yyyy-MM-dd" : "yyyy-MM-dd_HH-mm-ss";
+            return new SimpleDateFormat(pattern).parse(name).getTime();
         }catch(Throwable t){
             return dir.lastModified();
         }
@@ -534,6 +756,169 @@ public class Coordinator{
         }
     }
 
+    // ---------------- history, notes and cross-sector chat ----------------
+
+    private static class HistoryList{
+        public HistoryEvent[] events = {};
+    }
+
+    private synchronized void loadHistory(){
+        if(historyFile == null || !historyFile.exists()) return;
+
+        try{
+            HistoryList list = JsonIO.read(HistoryList.class, historyFile.readString());
+            if(list == null || list.events == null) return;
+
+            history.clear();
+            for(HistoryEvent event : list.events){
+                if(event != null) history.add(event);
+            }
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not read history.json", t);
+        }
+    }
+
+    private synchronized void addHistory(String type, String sector, String player, String text){
+        HistoryEvent event = new HistoryEvent();
+        event.time = System.currentTimeMillis();
+        event.type = type == null ? "" : type;
+        event.sector = sector == null ? "" : sector;
+        event.player = player == null ? "" : player;
+        event.text = text == null ? "" : text;
+
+        history.add(event);
+        while(history.size() > maxHistoryEvents) history.remove(0);
+
+        if(historyFile == null) return;
+        try{
+            HistoryList list = new HistoryList();
+            list.events = history.toArray(new HistoryEvent[0]);
+            SectorRunner.writeAtomic(historyFile, JsonIO.write(list));
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not write history.json", t);
+        }
+    }
+
+    private String historyJson(HttpExchange ex) throws IOException{
+        if("POST".equalsIgnoreCase(ex.getRequestMethod())){
+            HistoryEvent req = JsonIO.read(HistoryEvent.class, body(ex));
+            if(req == null || req.type == null || !req.type.matches("lost|capture|land|snapshot|restore|home|pads|note")){
+                return "{\"ok\":false}";
+            }
+            addHistory(req.type, req.sector, req.player, req.text);
+            return "{\"ok\":true}";
+        }
+
+        StringBuilder json = new StringBuilder("{\"events\":[");
+        synchronized(this){
+            boolean first = true;
+            for(int i = history.size() - 1; i >= 0; i--){
+                HistoryEvent event = history.get(i);
+                if(!first) json.append(',');
+                first = false;
+
+                json.append("{\"time\":").append(event.time)
+                    .append(",\"type\":\"").append(esc(event.type))
+                    .append("\",\"sector\":\"").append(esc(event.sector))
+                    .append("\",\"player\":\"").append(esc(event.player))
+                    .append("\",\"text\":\"").append(esc(event.text)).append("\"}");
+            }
+        }
+        return json.append("]}").toString();
+    }
+
+    private String noteJson(HttpExchange ex) throws IOException{
+        NoteRequest req = JsonIO.read(NoteRequest.class, body(ex));
+        Sector sector = req == null ? null : sector(req.planet, req.id);
+        if(sector == null) return "{\"ok\":false,\"error\":\"Нет такого сектора.\"}";
+
+        String key = req.planet + "-" + req.id;
+        Jval notes = readNotes();
+        Jval entry = Jval.newObject();
+        entry.put("title", req.title == null ? "" : req.title.trim());
+        entry.put("note", req.note == null ? "" : req.note.trim());
+        notes.put(key, entry);
+
+        notesFile.parent().mkdirs();
+        SectorRunner.writeAtomic(notesFile, notes.toString());
+
+        addHistory("note", key, req.player, "Название/заметка обновлены");
+        return "{\"ok\":true}";
+    }
+
+    private Jval readNotes(){
+        if(notesFile == null || !notesFile.exists()) return Jval.newObject();
+        try{
+            Jval json = Jval.read(notesFile.readString());
+            return json == null || !json.isObject() ? Jval.newObject() : json;
+        }catch(Throwable t){
+            return Jval.newObject();
+        }
+    }
+
+    private static String noteField(Jval notes, String key, String field){
+        Jval entry = notes == null ? null : notes.get(key);
+        if(entry == null || !entry.isObject()) return "";
+        return entry.getString(field, "");
+    }
+
+    /** POST adds a line, GET returns everything newer than ?since=. */
+    private String chatJson(HttpExchange ex) throws IOException{
+        if("POST".equalsIgnoreCase(ex.getRequestMethod())){
+            ChatPost req = JsonIO.read(ChatPost.class, body(ex));
+            if(req == null || req.message == null || req.message.isBlank()) return "{\"ok\":false}";
+
+            synchronized(chat){
+                ChatMessage message = new ChatMessage();
+                message.id = ++chatId;
+                message.time = System.currentTimeMillis();
+                message.player = req.player == null ? "" : req.player;
+                message.sector = req.sector == null ? "" : req.sector;
+                message.message = req.message;
+                chat.add(message);
+
+                while(chat.size() > maxChatMessages) chat.remove(0);
+            }
+            return "{\"ok\":true}";
+        }
+
+        long since = 0;
+        String query = ex.getRequestURI().getQuery();
+        if(query != null){
+            for(String part : query.split("&")){
+                if(part.startsWith("since=")){
+                    try{
+                        since = Long.parseLong(part.substring("since=".length()));
+                    }catch(NumberFormatException ignored){
+                    }
+                }
+            }
+        }
+
+        StringBuilder json = new StringBuilder();
+        synchronized(chat){
+            //a restarted coordinator starts ids from 1; a client with an old id must not stall
+            if(since > chatId) since = chatId;
+            if(!chat.isEmpty() && since < chat.get(0).id - 1) since = chat.get(0).id - 1;
+
+            json.append("{\"next\":").append(chatId).append(",\"messages\":[");
+            boolean first = true;
+            for(ChatMessage message : chat){
+                if(message.id <= since) continue;
+                if(!first) json.append(',');
+                first = false;
+
+                json.append("{\"id\":").append(message.id)
+                    .append(",\"time\":").append(message.time)
+                    .append(",\"player\":\"").append(esc(message.player))
+                    .append("\",\"sector\":\"").append(esc(message.sector))
+                    .append("\",\"message\":\"").append(esc(message.message)).append("\"}");
+            }
+            json.append("]}");
+        }
+        return json.toString();
+    }
+
     public Fi unlocksFile(){
         return home == null ? null : home.unlocksFile;
     }
@@ -553,6 +938,7 @@ public class Coordinator{
         home.save();
         home.markLost();
         home.loaded = false;
+        addHistory("lost", homeSector, "", "Домашний сектор потерян");
     }
 
     // ---------------- http ----------------
@@ -567,6 +953,9 @@ public class Coordinator{
         http.createContext("/snapshots", ex -> respond(ex, handle(ex, this::snapshotsJson)));
         http.createContext("/snapshot", ex -> respond(ex, handle(ex, this::snapshotJson)));
         http.createContext("/restore", ex -> respond(ex, handle(ex, this::restoreJson)));
+        http.createContext("/chat", ex -> respond(ex, handle(ex, this::chatJson)));
+        http.createContext("/history", ex -> respond(ex, handle(ex, this::historyJson)));
+        http.createContext("/note", ex -> respond(ex, handle(ex, this::noteJson)));
         httpExecutor = Executors.newFixedThreadPool(2);
         http.setExecutor(httpExecutor);
         http.start();
@@ -641,12 +1030,20 @@ public class Coordinator{
         out.players = homePlayers + instances.totalPlayers();
 
         Snapshot snap = snapshot();
+        Jval notes = readNotes();
         StringBuilder json = new StringBuilder("{\"home\":\"").append(esc(homeSector)).append("\",");
         json.append("\"maxSectors\":").append(config.maxSectors).append(',');
         json.append("\"maxPlayers\":").append(config.maxPlayers).append(',');
         json.append("\"players\":").append(out.players).append(',');
         json.append("\"steamHost\":\"").append(esc(steamHost())).append("\",");
         json.append("\"steamId\":").append(SteamSupport.steamId()).append(',');
+        json.append("\"moderators\":[");
+        String[] moderators = Moderators.list();
+        for(int i = 0; i < moderators.length; i++){
+            if(i > 0) json.append(',');
+            json.append('"').append(esc(moderators[i])).append('"');
+        }
+        json.append("],");
         json.append("\"sectors\":[");
 
         boolean first = true;
@@ -659,6 +1056,16 @@ public class Coordinator{
                 boolean hasBase = snap.hasBase.get(key, false);
                 boolean running = key.equals(homeSector) || instances.get(key) != null;
                 int players = key.equals(homeSector) ? homePlayers : (instances.get(key) == null ? 0 : instances.get(key).players);
+                boolean captured = info != null && info.hasCore && !info.waves && !info.attack;
+
+                //the map asks for this list often; record a capture once, when it flips
+                synchronized(this){
+                    Boolean previous = this.captured.get(key);
+                    if(previous != null && !previous && captured){
+                        addHistory("capture", key, "", "Сектор захвачен");
+                    }
+                    this.captured.put(key, captured);
+                }
 
                 if(!first) json.append(',');
                 first = false;
@@ -667,8 +1074,10 @@ public class Coordinator{
                     .append("\"planet\":\"").append(esc(planet.name)).append("\",")
                     .append("\"id\":").append(sector.id).append(',')
                     .append("\"name\":\"").append(esc(sectorName(sector, info))).append("\",")
+                    .append("\"title\":\"").append(esc(noteField(notes, key, "title"))).append("\",")
+                    .append("\"note\":\"").append(esc(noteField(notes, key, "note"))).append("\",")
                     .append("\"hasBase\":").append(hasBase).append(',')
-                    .append("\"captured\":").append(info != null && info.hasCore && !info.waves && !info.attack).append(',')
+                    .append("\"captured\":").append(captured).append(',')
                     .append("\"attacked\":").append(info != null && info.hasCore && (info.waves || info.attack)).append(',')
                     .append("\"allowed\":").append(allowed(sector, snap)).append(',')
                     .append("\"running\":").append(running).append(',')
@@ -746,6 +1155,7 @@ public class Coordinator{
                 out.error = "Не удалось запустить сектор.";
                 return landJson(out);
             }
+            addHistory("land", key, req.player, "Запуск сектора");
         }
 
         //another player may be landing on the same sector right now
@@ -884,6 +1294,7 @@ public class Coordinator{
         }
 
         writeHome(key);
+        addHistory("home", key, req.player, "Домашний сектор изменён");
 
         if(homePlayers == 0){
             Core.app.post(() -> switchHome(key));
@@ -927,6 +1338,7 @@ public class Coordinator{
 
         //instances poll this file and apply the same destination to their live sector
         SectorRunner.writeAtomic(campaign.child("pads.json"), "{\"planet\":\"" + esc(req.planet) + "\",\"id\":" + req.id + "}");
+        addHistory("pads", req.planet + "-" + req.id, req.player, "Пусковые площадки направлены на " + req.planet + "-" + req.id);
         Log.info("[mp-sectors] launch pads directed to @ (@ sectors updated)", req.planet + "-" + req.id, updated);
         return "{\"ok\":true}";
     }
@@ -1147,7 +1559,7 @@ public class Coordinator{
         writeHome(key);
     }
 
-    private static String esc(String value){
+    static String esc(String value){
         if(value == null) return "";
         StringBuilder out = new StringBuilder(value.length() + 8);
         for(int i = 0; i < value.length(); i++){

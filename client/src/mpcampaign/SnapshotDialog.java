@@ -24,7 +24,7 @@ public class SnapshotDialog extends BaseDialog{
         cont.table(t -> {
             t.button("Создать снимок", Icon.save, MpCampaignMod::saveSnapshot).size(200f, 46f).left();
             t.button("Обновить", Icon.refresh, this::load).size(150f, 46f).padLeft(6f).left();
-            t.add("[lightgray]новый снимок каждые 10 минут, хранится до 50").padLeft(12f).left();
+            t.add("[lightgray]каждые 10 минут, до 50 штук; дневной — 7 дней; перед откатом — автоматически").padLeft(12f).left();
         }).growX().left().row();
 
         cont.pane(t -> {
@@ -62,13 +62,27 @@ public class SnapshotDialog extends BaseDialog{
                 String name = MpCampaignMod.str(value, "name");
                 long time = MpCampaignMod.numLong(value, "time", 0);
                 long size = MpCampaignMod.numLong(value, "size", 0);
+                boolean daily = MpCampaignMod.bool(value, "daily");
+                boolean beforeRestore = MpCampaignMod.bool(value, "beforeRestore");
+                boolean valid = !value.has("valid") || MpCampaignMod.bool(value, "valid");
 
                 Table row = new Table();
                 row.left();
                 row.add("[accent]" + name + "[]").width(190f).left();
                 row.add("[lightgray]" + new SimpleDateFormat("dd.MM.yyyy HH:mm").format(new Date(time)) + "[]").width(170f).left();
                 row.add("[lightgray]" + Strings.format("%.1f МБ", size / 1024f / 1024f) + "[]").width(110f).left();
-                row.button("Загрузить", Icon.upload, () -> confirm(name)).size(160f, 46f).right();
+
+                if(daily) row.add("[cyan]дневной[]").width(110f).left();
+                else if(beforeRestore) row.add("[orange]перед откатом[]").width(140f).left();
+                else row.add().width(110f);
+
+                if(!valid) row.add("[scarlet]повреждён[]").width(120f).left();
+
+                if(valid){
+                    row.button("Загрузить", Icon.upload, () -> confirm(name)).size(160f, 46f).right();
+                }else{
+                    row.button("Загрузить", Icon.upload, () -> {}).size(160f, 46f).right().disabled(true);
+                }
 
                 list.add(row).growX().left().padBottom(4f).row();
             }
