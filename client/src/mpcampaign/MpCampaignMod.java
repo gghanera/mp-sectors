@@ -95,6 +95,10 @@ public class MpCampaignMod extends Mod{
     private static long lastChatId, lastChatPoll;
     private static boolean chatPending;
 
+    //the moderator list and player counts change while playing; /status is cheap
+    private static long lastStatusPoll;
+    private static boolean statusPending;
+
     @Override
     public void init(){
         Events.on(ClientLoadEvent.class, e -> {
@@ -189,6 +193,7 @@ public class MpCampaignMod extends Mod{
 
         updateTimeControl();
         pollChat();
+        pollStatus();
 
         if(ServerProcess.running()){
             ServerProcess.refreshStatus();
@@ -410,15 +415,7 @@ public class MpCampaignMod extends Mod{
         players = num(root, "players", 0);
 
         entries.clear();
-        moderators.clear();
-
-        Jval mods = root.get("moderators");
-        if(mods != null && mods.isArray()){
-            for(Jval value : mods.asArray()){
-                String name = value.asString();
-                if(name != null && !name.isEmpty()) moderators.add(name);
-            }
-        }
+        parseModerators(root);
 
         Jval array = root.get("sectors");
         if(array == null || !array.isArray()) return;
@@ -450,6 +447,33 @@ public class MpCampaignMod extends Mod{
         sectors = num(root, "sectors", 1);
         maxSectors = num(root, "maxSectors", maxSectors);
         maxPlayers = num(root, "maxPlayers", maxPlayers);
+        parseModerators(root);
+    }
+
+    /** Keeps the moderator list (and player counts) fresh while playing. */
+    private static void parseModerators(Jval root){
+        Jval mods = root == null ? null : root.get("moderators");
+        if(mods == null || !mods.isArray()) return;
+
+        moderators.clear();
+        for(Jval value : mods.asArray()){
+            String name = value.asString();
+            if(name != null && !name.isEmpty()) moderators.add(name);
+        }
+    }
+
+    private static void pollStatus(){
+        if(Vars.headless || Vars.net == null || !Vars.net.client() || !Vars.state.isGame() || !Vars.state.isCampaign()) return;
+
+        long now = System.currentTimeMillis();
+        if(statusPending || now - lastStatusPoll < 30000L) return;
+        lastStatusPoll = now;
+        statusPending = true;
+
+        Http.get(url() + "/status", 8000, json -> {
+            statusPending = false;
+            if(json != null) parseStatus(json);
+        });
     }
 
     private static void applyData(){

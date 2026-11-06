@@ -1356,6 +1356,13 @@ public class Coordinator{
         json.append("\"sectors\":").append(out.sectors).append(',');
         json.append("\"maxSectors\":").append(config.maxSectors).append(',');
         json.append("\"maxPlayers\":").append(config.maxPlayers).append(',');
+        json.append("\"moderators\":[");
+        String[] moderators = Moderators.list();
+        for(int i = 0; i < moderators.length; i++){
+            if(i > 0) json.append(',');
+            json.append('"').append(esc(moderators[i])).append('"');
+        }
+        json.append("],");
         json.append("\"instances\":[");
         boolean first = true;
         for(InstanceManager.Instance inst : instances.all()){
