@@ -38,13 +38,13 @@ MP-Sectors/
 Steam-сборка Mindustry портативная: данные лежат не в `%APPDATA%`, а в
 `...\steamapps\common\Mindustry\saves\`.
 
-- моды: `...\saves\mods\` — `mp-campaign.jar` (2.1.0) и `any-research.jar` уже положены,
-  старый `mp-campaign.jar` сохранён как `mp-campaign.jar.v1.2.0.bak`;
+- моды: `...\saves\mods\` — `mp-campaign.jar` (2.1.0) и `any-research.jar`;
 - кампания: `...\saves\saves\` и `...\saves\settings.bin`.
 
-Кампания из Steam уже перенесена в `campaign/`: 87 секторов Serpulo/Erekir, домашний —
-`serpulo-243`, исследования и `SectorInfo` — из `settings.bin`. Steam-сейвы не удалялись
-и не изменялись; в Steam-настройках только включён мод `mp-campaign`.
+Кампания из Steam переносится в `campaign/` (87 секторов Serpulo/Erekir, исследования и
+`SectorInfo` из `settings.bin`); текущий домашний сектор хранится в `campaign/home.json`.
+Steam-сейвы при этом не удаляются и не изменяются; в Steam-настройках просто включается
+мод `mp-campaign`.
 
 ## Запуск
 
