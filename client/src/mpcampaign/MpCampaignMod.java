@@ -874,7 +874,7 @@ public class MpCampaignMod extends Mod{
         lastChatPoll = now;
         chatPending = true;
 
-        Http.get(url() + "/chat?since=" + lastChatId, json -> {
+        Http.get(url() + "/chat?since=" + lastChatId, 8000, json -> {
             chatPending = false;
             if(json == null){
                 //coordinator offline: retry slowly instead of logging an error twice a second

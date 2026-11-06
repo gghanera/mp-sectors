@@ -956,7 +956,7 @@ public class Coordinator{
         http.createContext("/chat", ex -> respond(ex, handle(ex, this::chatJson)));
         http.createContext("/history", ex -> respond(ex, handle(ex, this::historyJson)));
         http.createContext("/note", ex -> respond(ex, handle(ex, this::noteJson)));
-        httpExecutor = Executors.newFixedThreadPool(2);
+        httpExecutor = Executors.newFixedThreadPool(4);
         http.setExecutor(httpExecutor);
         http.start();
     }
