@@ -3,7 +3,7 @@
 #   .\fetch.ps1 -Client   Mindustry.jar (client mod builds)
 #   .\fetch.ps1 -All      both
 param(
-    [string]$Version = "v160.6",
+    [string]$Version = "v160.7",
     [switch]$Force,
     [switch]$Client,
     [switch]$All
