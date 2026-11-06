@@ -1,342 +1,325 @@
-# MP Sectors — кампания на несколько секторов
+[English](README.md) | [Русский](README.ru.md)
 
-Один координатор + до 5 одновременно загруженных секторов, до 10 игроков.
-Игроки заходят на координатор, открывают карту секторов и высаживаются куда хотят
-(только туда, куда пускает кампания).
+# MP Sectors — a multi-sector Mindustry campaign
 
-## Что в папке
+One coordinator plus up to **5 simultaneously loaded sectors** and **10 players**.
+Players join the coordinator, open the sector map and land wherever the campaign allows.
+Each sector runs as its own headless Mindustry server, so the world keeps running while
+players are elsewhere.
 
-```
-MP-Sectors/
-  mp-sectors.ps1        менеджер (координатор и инстансы)
-  fetch.ps1             скачать официальный серверный jar (не Steam)
-  build.ps1             собрать серверный мод из src/
-  libs/server-release.jar
-  build/mp-sectors.jar  серверный мод (скрытый)
-  src/                  исходники серверного мода
-  mods/mp-campaign.jar  клиентский мод (ставится всем игрокам)
-  mods/mp-sectors.jar   копия серверного мода
-  campaign/             сейвы секторов, SectorInfo, исследования, home.json
-  F:\MP-Sectors\backups  снимки всей кампании (до 50, каждые 10 минут)
-  client/               исходники и сборка клиентского мода
-```
+This repository contains everything needed to build and run the setup:
 
-## Установка
+| Component | Path | What it is |
+|---|---|---|
+| **mp-sectors** | `src/`, `mod.hjson` | Server mod: coordinator, sector instances, snapshots, research sync, chat relay |
+| **mp-campaign** | `client/` | Client mod: sector map, landing, snapshots, Time Control, cross-sector chat |
+| **any-research** | `any-research/` | Client/server bridge that lets every player research on a dedicated server |
+| **Coordinator / launcher** | `mp-sectors.ps1`, `client/src/.../ServerProcess.java` | Starts the home sector and spawns sector servers on demand |
+| **Docs** | `docs/` | Full Russian description and changelog |
 
-1. **Всем игрокам**: скопировать в `%APPDATA%\Mindustry\mods`:
-   - `mods\mp-campaign.jar` (карта секторов и высадка);
-   - `client-mods\any-research.jar` (исследования на сервере; у тебя уже стоит).
-   Перезапустить игру.
-2. **На сервере**: JDK 17+ и PowerShell 7. `any-research.jar` на сервер ставить не нужно.
+The official Mindustry server/client jars are **not** committed. `fetch.ps1` downloads them
+from the official Anuken/Mindustry releases.
 
-### Steam-версия
+---
 
-Steam-сборка Mindustry портативная: данные лежат не в `%APPDATA%`, а в
-`...\steamapps\common\Mindustry\saves\`.
+## Requirements
 
-- моды: `...\saves\mods\` — `mp-campaign.jar` (2.1.0) и `any-research.jar` уже положены,
-  старый `mp-campaign.jar` сохранён как `mp-campaign.jar.v1.2.0.bak`;
-- кампания: `...\saves\saves\` и `...\saves\settings.bin`.
+- **Windows** (the launcher and scripts are PowerShell; the Java mods themselves are portable).
+- **PowerShell 7** (`pwsh`).
+- **JDK 17 or newer** on the server. The Steam-bundled JRE is trimmed and cannot run a
+  dedicated server; the launcher looks for `JAVA_HOME` or `java` in `PATH`.
+- Mindustry **build 160.x** (the mods target 160; min game version 160).
+- For remote play: **Radmin VPN / ZeroTier / Tailscale**, or port forwarding. Steam
+  networking is experimental and disabled by default.
 
-Кампания из Steam уже перенесена в `campaign/`: 87 секторов Serpulo/Erekir, домашний —
-`serpulo-243`, исследования и `SectorInfo` — из `settings.bin`. Steam-сейвы не удалялись
-и не изменялись; в Steam-настройках только включён мод `mp-campaign`.
+---
 
-## Запуск
+## Quick start
 
-### Из игры (рекомендуется)
-
-1. Главное меню → кнопка **«Сервер кампании»** слева внизу (или `F9` в любой момент).
-2. Проверить поля (папка сервера подставляется автоматически — эта папка), нажать **«Запустить»**.
-3. Статус под кнопками: запущен/остановлен, игроки, секторы, HTTP.
-4. **«Карта»** — открыть карту кампании **сервера** (данные с координатора), даже если вы
-   ещё не подключены. **«Остановить»** — сохранить и погасить.
-
-Мод сам копирует `mods/mp-sectors.jar` и `mods/mp-campaign.jar` в `coordinator/config/mods`,
-пишет конфиг и запускает `libs/server-release.jar` на JRE игры.
-
-> **Java.** Встроенная в Steam-версию Java — урезанная (нет `java.logging`), сервер на ней
-> падает сразу после старта. Лаунчер это видит и берёт полный JDK: сначала `JAVA_HOME`,
-> потом `java` из `PATH`. Если не нашёл — впиши путь к `java.exe` (JDK 17+) в поле **Java**.
-
-### Из PowerShell
+### 1. Server
 
 ```powershell
-cd <эта папка>
+git clone https://github.com/<your-account>/mp-sectors.git
+cd mp-sectors
+
+.\fetch.ps1                 # downloads libs\server-release.jar
+.\build.ps1                 # builds build\mp-sectors.jar
 .\mp-sectors.ps1 coordinator
 ```
 
-Печатает:
+The coordinator prints:
+
 ```
 coordinator ready: game 127.0.0.1:6567, http 127.0.0.1:8090
 ```
 
-Игроки подключаются к `IP:6567` (как к обычному серверу).
+Players connect to `IP:6567` like to a normal Mindustry server. The coordinator hosts the
+**home sector**; other sectors are started on demand.
 
-Остановка:
+Stop it with:
 
 ```powershell
 .\mp-sectors.ps1 coordinator-stop
 ```
 
-## Как играть
+### 2. Clients
 
-1. Зайти на координатор (`IP:6567`) — вы в домашнем секторе.
-2. Открыть карту секторов: клавиша `N` (или пауза → «Карта планет»).
-3. Слева сверху — статус: игроки, секторы, домашний сектор, кнопки «Обновить», «Адрес», «В лобби».
-4. Выбрать сектор на карте. Внизу справа — «Высадиться» (или двойной клик / кнопка на карте).
-5. Координатор проверит кампанию и лимиты, поднимет сектор и перекинет вас туда.
-6. «В лобби» — вернуться в домашний сектор. «Домашний» — сделать выбранный сектор домашним
-   (сменится, когда из текущего все выйдут).
+Every player copies into `%APPDATA%\Mindustry\mods` (Steam: `...\saves\mods`):
 
-### Steam-подключение
+- `mods\mp-campaign.jar` — sector map, landing, snapshots, chat;
+- `client-mods\any-research.jar` — research on a dedicated server.
 
-Steam-сеть **экспериментальная и по умолчанию выключена**: в окне «Сервер кампании»
-галочка **«Steam-сеть»** снята. С выделенным сервером Steam-провайдер Mindustry ломает
-handshake (сервер видит TCP-подключение, но не получает `Connect`), поэтому мир не
-загружается.
+Then restart Mindustry and join `IP:6567`.
 
-Для игры с друзьями используй TCP/UDP:
+> `any-research.jar` is **client-side only**. Do not put it into the server mods folder,
+> otherwise its command is registered twice.
 
-- **Radmin VPN / ZeroTier / Tailscale** — друг подключается к твоему виртуальному IP;
-- либо проброс портов `6567` и `6570–6574` (TCP+UDP) и внешний IP.
+### 3. In-game launcher (optional)
 
-Скрипт `mp-sectors.ps1` запускает Steam только с явным ключом `-Steam`.
+Instead of PowerShell, open **Main menu → “Сервер кампании”** (bottom-left) or press `F9`.
+The launcher writes `coordinator/config/mp-coordinator.json`, copies the mods, starts the
+server jar on the game JRE and shows status. It also has a **“Карта”** button that opens the
+server's campaign map before you connect.
 
-### Высадка на новый сектор
+---
 
-При высадке на сектор **без базы** открывается ванильное окно выбора схемы ядра
-(`LaunchLoadoutDialog`): можно выбрать схему и запас ресурсов. Выбранная схема ставится
-на точке высадки, ресурсы заливаются в ядро, а их стоимость списывается из сектора,
-откуда вы летите.
+## How it works
 
-### Потерянные и «сломанные» секторы
+```
+player ── TCP ──> coordinator (home sector, game port 6567)
+                       │
+                       ├── HTTP API :8090  (sector list, landing, snapshots, chat, history)
+                       │
+                       ├── instance 6570  sector A
+                       ├── instance 6571  sector B
+                       ├── instance 6572  sector C
+                       └── ...
+```
 
-Бывает, что в сохранении сектора нет ядра: база потеряна, или сохранение сделано с
-модами, которых сейчас нет. Такой сектор нельзя загрузить, и раньше сервер через
-10–20 секунд перекидывал игрока на встроенную карту (Tendrils, Maze и т.п.).
+- The coordinator is a normal headless Mindustry process with the **mp-sectors** mod.
+- It hosts the home sector and keeps the campaign folder (`campaign/`): sector saves,
+  `SectorInfo`, research, home, notes, history.
+- When a player lands on another sector, the coordinator starts a headless server for it
+  (up to `maxSectors`, including the home), waits for the port, and tells the client where
+  to connect.
+- All instances share the same campaign folder. Research is merged live through
+  `campaign/unlocks.json`; launch costs and accelerator requests travel through
+  `campaign/requests/`.
+- An empty instance saves and shuts down after `idleStopSeconds`.
 
-Теперь так:
+---
 
-- при высадке сервер проверяет, есть ли в сохранении ядро и метка кампании;
-- если нет — высадка отменяется с сообщением «Не удалось запустить сектор», а сектор
-  помечается как **без базы** (на карте снова доступен выбор схемы);
-- повторная высадка **генерирует сектор заново** с выбранной схемой и ресурсами;
-- при этом сохраняются **планы разрушенных построек** (те самые «призраки», которые
-  показывает клавиша B): старую базу можно восстановить по планам;
-- если ядро уничтожили во время игры, сектор сохраняется, помечается потерянным,
-  сервер сектора выключается — встроенная карта больше не подставляется;
-- потерянный домашний сектор отстраивается заново при следующем запуске координатора;
-  до перезапуска высадка в него отклоняется.
+## Features
 
-Старые сохранения, которые уже успели превратиться во встроенную карту, определяются
-автоматически и тоже перегенерируются.
+### Sector map and landing
 
-### Снимки кампании (автосохранения)
+- `N` (or pause → planet map) opens the campaign map with the coordinator's data.
+- Sectors are gated by the campaign: starting sector, neighbouring story sectors, numbered
+  sectors after a better core, other planets only via an existing base.
+- Landing on a sector without a base opens the vanilla core loadout dialog; the schematic
+  and resources cost is deducted from the source sector.
+- Lost/broken sectors are detected (no core / not a campaign map), saved, marked unowned and
+  regenerated on the next landing. **Destroyed-building plans** (the `B` ghosts) are carried
+  into the regenerated sector.
+- Normal landing and the Interplanetary Accelerator play the vanilla launch animation.
+- Thorium reactors explode like vanilla: `reactorExplosions` is forced on when a sector loads.
 
-Каждые 10 минут координатор копирует **всю кампанию** (секторы, SectorInfo, исследования,
-дом, площадки) в папку на диске **F:**. Хранятся последние **50** снимков,
-старые удаляются автоматически.
+### Campaign snapshots
 
-- папка: `F:\MP-Sectors\backups\<ГГГГ-ММ-ДД_ЧЧ-ММ-СС>\`;
-- **дневной снимок**: первый снимок дня дополнительно копируется в `backups\daily\<ГГГГ-ММ-ДД>`;
-  хранится **7 дней** — удобно откатиться «на вчера», не листая 50 снимков;
-- **снимок перед откатом**: перед каждым восстановлением автоматически создаётся
-  `before-restore_<дата>` — если откат окажется неудачным, можно вернуться к состоянию до него;
-- снимок можно создать вручную: **Ctrl+S** в игре (модераторы) или кнопка
-  **«Создать снимок»** в окне «Снимки» (там же — `mpsnapshot` в консоли координатора);
-- загрузить: кнопка **«Снимки»** на карте (или в окне «Сервер кампании») → выбрать → «Загрузить»;
-- загрузка доступна **модераторам** (по умолчанию `GGhanera`);
-- при загрузке все секторы останавливаются, кампания заменяется снимком, домашний сектор
-  перезагружается, игроков отключает; клиент сам переподключается в лобби;
-- при запуске координатор **проверяет целостность** снимков: у каждого должен быть каталог
-  `sectors` хотя бы с одним читаемым `.msav`. Битые снимки помечаются в окне как
-  «повреждён» и не загружаются;
-- снимки не входят в саму кампанию, их можно копировать на другой диск вручную;
-- 50 снимков ≈ 370 МБ (кампания сейчас ~7.4 МБ).
+- The whole campaign is copied every 10 minutes to `F:\MP-Sectors\backups` (configurable
+  with `snapshotDir`), keeping the newest **50**.
+- **Daily** snapshots: the first snapshot of a day is also stored in `backups\daily\<date>`
+  and kept for **7 days**.
+- **Before-restore** snapshot: every rollback first creates `before-restore_<date>` so a bad
+  restore can be undone.
+- Startup **integrity check**: each snapshot must contain a readable `.msav`; broken ones are
+  marked “повреждён” and cannot be restored.
+- Manual snapshot: `Ctrl+S` (moderators) or the “Создать снимок” button; `mpsnapshot` in the
+  coordinator console.
 
-### Чат между секторами
+### Cross-sector chat
 
-Игроки в разных секторах видят чат друг друга. Каждый сервер сектора пересылает сообщения
-координатору, а клиенты раз в 2 секунды забирают новые строки из других секторов:
+Players in different sectors see each other's chat:
 
-- сообщение показывается как `[сектор] Ник: текст` (например, `[Дом] IgorPank: привет`);
-- свои сообщения в своём секторе не дублируются — их показывает обычный чат;
-- история чата живёт в памяти координатора (последние 200 строк) и очищается при его
-  перезапуске; в файлы чат не пишется;
-- если координатор недоступен, клиент молча повторяет запрос реже (раз в ~10 секунд);
-- всем игрокам нужен обновлённый `mp-campaign.jar` (2.1.0+), а серверу — обновлённый
-  `mp-sectors.jar`; после обновления перезапусти координатор и секторы.
+- each sector server forwards `PlayerChatEvent` to the coordinator (`POST /chat`);
+- clients poll `GET /chat?since=<id>` every 2 seconds and add messages from other sectors
+  to the normal chat as `[sector] Name: text`;
+- messages from your own sector are skipped (vanilla already shows them);
+- the buffer is 200 lines in memory; commands are not relayed; the server word filter is
+  applied before relaying.
 
-### Модераторы
+### Moderators
 
-Модераторы могут ставить паузу, менять скорость игры, покидать сектор и управлять снимками.
-Список хранится в `campaign\moderators.json` (обычный JSON-массив имён):
+Moderators can pause, change speed, abandon sectors and manage snapshots. The list is
+`campaign\moderators.json` (default `["GGhanera"]`):
 
 ```json
-["GGhanera"]
+["GGhanera", "IgorPank"]
 ```
 
-- по умолчанию модератор — хост `GGhanera`; файл создаётся сам при первом запуске;
-- управление из консоли сервера/координатора: `mpmod add <ник>`, `mpmod remove <ник>`,
-  `mpmod list`;
-- файл можно править вручную — изменения подхватываются без перезапуска (по времени изменения);
-- список общий для координатора и всех секторов, права проверяются и на клиенте, и на сервере;
-- обычные игроки не могут ставить паузу, менять скорость, покидать сектор и откатывать снимки.
+- manage it from the server console: `mpmod add <name>`, `mpmod remove <name>`, `mpmod list`;
+- editing the file by hand is also supported; changes are picked up without a restart;
+- the coordinator and every instance share the file; permissions are checked on the client
+  and on the server;
+- regular players cannot pause, change speed, abandon a sector or restore snapshots.
 
-### Карта кампании: статистика, фильтры, заметки
+### Map UI
 
-На карте (кнопка «КАМПАНИЯ») появились:
+- **Sector stats**: wave, core items/capacity, production, imports and exports per minute.
+- **Filters**: All / Bases / Attacked / Allowed, with a clickable sector list.
+- **Legend**: base, attacked, not unlocked, “you are here”.
+- **Names and notes**: “Заметка” stores a custom sector name and note in
+  `campaign\notes.json`.
+- **History**: landings, captures, losses, home changes, launch pads, snapshots, restores and
+  notes in `campaign\history.json`.
 
-- **статистика выбранного сектора**: волна, ресурсы в ядре и вместимость, добыча,
-  импорт и экспорт в минуту;
-- **фильтры** — «Все», «Базы», «Атака», «Открытые»: список секторов, клик по строке
-  выбирает сектор на карте;
-- **легенда** цветов: база, атака, не открыт, вы здесь;
-- **названия и заметки**: кнопка «Заметка» — своё название сектора и произвольный текст;
-  хранятся в `campaign\notes.json`, видны всем игрокам;
-- **история кампании**: запуск сектора, захват, потеря, смена дома, площадки, снимки,
-  откаты и заметки; хранится в `campaign\history.json`, кнопка «История» на карте;
-- обычная высадка (не через ускоритель) теперь тоже проигрывает **ванильную анимацию
-  запуска ядра**, а не просто подключает к серверу.
+### Other campaign features
 
-### Межпланетный ускоритель
+- **Research sync**: `any-research` lets any player research on a dedicated server; unlocks
+  are merged into `campaign/unlocks.json` and applied live in all running sectors.
+- **Launch pads**: “Направить пусковые площадки” points every pad on the planet at the
+  selected sector; running instances pick the change up in ~2 seconds.
+- **Time Control** (`sk7725timecontrol`) is mirrored onto the server: the speed slider
+  changes the world for everyone in that sector.
+- **Pause** (`Space` / `/pause`), **abandon** (`/abandon` or the pause-menu button), and the
+  vanilla **Interplanetary Accelerator** are supported.
+- **Two windows on one PC** for testing: duplicate clients are allowed by default.
 
-Блок работает как в ванили: заполните его ресурсами и энергией, нажмите на него — откроется
-карта планет, выберите сектор. Ускоритель **забирает все ресурсы из своего буфера** (не только
-стоимость ядра), тратит энергию и сбрасывает прогресс; излишек переезжает в ядро на новом
-секторе, как в ванили. Схема ядра — ванильная (core nucleus), без дополнительных модовых правил.
+---
 
-Перед высадкой проигрывается **ванильная анимация запуска**: камеры всех игроков в секторе
-переводятся на ускоритель, и только после анимации начинается загрузка нового сектора.
+## Configuration
 
-### Ториевые реакторы
+### Coordinator (`coordinator/config/mp-coordinator.json`)
 
-Взрываются как в ванили. В некоторых сейвах (особенно из контент-модов) правило
-`reactorExplosions` было выключено; кампания при загрузке сектора принудительно
-включает его, поэтому перегрев или разрушение реактора с топливом снова даёт взрыв
-и урон.
+| Field | Default | Meaning |
+|---|---|---|
+| `campaign` | — | Absolute path to the campaign folder |
+| `httpPort` | `8090` | HTTP API port |
+| `gamePort` | `6567` | Home sector game port |
+| `maxSectors` | `5` | Loaded sectors including home |
+| `maxPlayers` | `10` | Total players |
+| `playerLimit` | `5` | Per-sector player limit |
+| `instanceBasePort` | `6570` | First port for sector instances |
+| `idleStopSeconds` | `60` | Stop an empty instance after this |
+| `autosaveSeconds` | `60` | Home autosave interval |
+| `snapshotDir` | `F:\MP-Sectors\backups` | Snapshot folder (empty = `backups` next to campaign) |
+| `memoryMb` | `1024` | JVM heap per instance |
+| `allowDuplicateClients` | `true` | Allow two windows from one PC |
+| `serverJar`, `javaPath` | — | Server jar and JDK paths |
 
-### Стоимость высадки
+### Campaign files
 
-При высадке на **новый** сектор (когда открывается окно схемы ядра) стоимость схемы и
-выбранных ресурсов списывается из ядра сектора, откуда вы летите — домашнего или обычного.
-Списание срабатывает и тогда, когда целевой сектор уже запущен на сервере.
-
-### Пауза
-
-**Пробел** — поставить/снять паузу кампании. Это могут делать **модераторы** (по умолчанию
-`GGhanera`); остальным сервер ответит отказом. Пауза останавливает логику мира на сервере
-(волны, юниты, производство), в чат приходит сообщение. То же самое — команда `/pause`.
-
-### «Покинуть» (покинуть сектор)
-
-Кнопка **«Покинуть»** в меню паузы (Escape) снова работает: она убивает ядро на сервере,
-сектор сохраняется как потерянный, и вы возвращаетесь в лобби. Доступна **модераторам**;
-у остальных кнопка остаётся неактивной. Если покинут домашний сектор, координатор отстроит
-его заново при следующем запуске.
-
-### Time Control
-
-Мод **Time Control** (`sk7725timecontrol`) поддерживается: скорость с ползунка применяется
-к **серверу** сектора, а не только к твоему клиенту.
-
-- двигаешь ползунок — мир ускоряется/замедляется у всех, кто в этом секторе;
-- менять скорость могут **модераторы** (как и паузу), остальным сервер откажет;
-- сервер держит диапазон `x0.25` … `x16`, крайние значения ограничиваются;
-- скорость сбрасывается на `x1` при перезапуске сектора или координатора;
-- вручную: `/speed 4` в чате или `speed 4` в консоли сервера.
-
-При смене сектора клиент сам отправляет выбранную скорость новому серверу.
-
-### Пусковые и посадочные площадки (v8)
-
-Выбери сектор на карте и нажми **«Направить пусковые площадки»**. Все площадки на этой
-планете начнут отправлять ресурсы в выбранный сектор:
-
-- назначение прописывается во все `campaign/info/*.json` этой планеты;
-- уже запущенные секторы подхватывают смену за ~2 секунды (через `campaign/pads.json`);
-- дальше работает штатная механика v8: в целевом секторе ресурсы прилетают **на посадочные
-  площадки** пачками по 100 штук с анимацией, а не в ядро;
-- у каждой посадочной площадки свой тип ресурса — он выбирается в меню площадки или
-  процессором (`config`), этот выбор мод не трогает;
-- скорость прилёта считается по `export`-статистике секторов-источников (как в ванили).
-
-Кнопка «Адрес» задаёт адрес координатора. По умолчанию мод берёт **тот же хост, к которому
-подключился игрок**, и порт `8090`: ты заходишь на `127.0.0.1:6567` — карта берётся с
-`http://127.0.0.1:8090`, друг заходит на `26.x.x.x:6567` (Radmin) — карта берётся с
-`http://26.x.x.x:8090`. Если адрес введён вручную, он главнее.
-
-Для друзей по Radmin/LAN на хосте должен быть разрешён входящий TCP `8090` (и игровые порты)
-в брандмауэре Windows; Radmin часто считается «общественной сетью».
-
-### Два окна на одном ПК (для теста)
-
-По умолчанию сервер **разрешает** несколько подключений с одного ПК: в окне «Сервер кампании»
-галочка «Разрешить 2 окна с одного ПК» включена (это выключает `strict` на сервере — проверку
-одинаковых UUID/имён). Запускай второе окно (лучше не Steam-сборку) и заходи тем же именем —
-пустит. Имена можно поменять в настройках клиента, чтобы не путаться.
-
-## Исследования
-
-На выделенном сервере дерево исследований недоступно хосту (его там нет), поэтому серверная часть
-мода **Any Research** встроена в `mp-sectors`:
-
-- клиент с `any-research.jar` шлёт `/anyresearch <token> <name>`;
-- сервер проверяет условия (цели, родительские узлы), списывает ресурсы и открывает узел,
-  после чего игра сама рассылает `Call.researched` всем клиентам;
-- ресурсы берутся из кампании: базы планет из `campaign/info/*.json`, текущий сектор — вживую.
-
-Игрокам нужен `client-mods\any-research.jar` (у тебя уже стоит). **На серверы его ставить не надо** —
-иначе команда зарегистрируется дважды.
-
-Админ-команда в консоли сервера: `anyresearch <name>`.
-
-Live-синк: как только кто-то исследует узел, `campaign/unlocks.json` обновляется сразу, а остальные
-запущенные инстансы раз в ~2 секунды проверяют файл и открывают то же самое у себя (каждый рассылает
-`Call.researched` своим клиентам). Файл пишется как объединение множеств, поэтому ничего не теряется.
-
-Стоимость из чужих секторов считается по их последнему сохранённому `SectorInfo` (может отставать
-на время между автосейвами).
-
-## Что можно и нельзя
-
-- **В начале кампании** доступны только стартовый сектор и соседние сюжетные (Ледяной лес).
-- **Сюжетные секторы**: открытые по дереву технологий или соседние с базой.
-- **Безымянные (номерные) секторы**: только после исследования ядра-фундамента (или ядра) и
-  только рядом с базой.
-- **Другая планета**: только если там уже есть база.
-- На карте недоступные секторы даже не выбираются (клик блокируется), у доступных сюжетных
-  больше нет замка.
-- Лимит: **5 секторов** одновременно (домашний считается), **10 игроков** суммарно.
-  Если мест нет — «Места заняты».
-- Новый сектор генерируется со стандартным ядром (без диалога груза).
-- Пустой инстанс сохраняется и гасится через `idleStopSeconds` (60 с по умолчанию).
-- Не запускайте `mp-campaign` на серверах вручную: скрипт сам кладёт его в `coordinator/config/mods`,
-  а менеджер копирует во все инстансы (нужно для совпадения списка модов).
-- Папку `campaign/` бэкапить: это вся кампания.
-
-## Параметры
-
-```powershell
-.\mp-sectors.ps1 coordinator -HttpPort 8090 -GamePort 6567 -InstancePort 6570 `
-    -MaxSectors 5 -MaxPlayers 10 -IdleStop 60 -MemoryMb 1024
+```
+campaign/
+  sectors/<planet>-<id>.msav   sector saves
+  info/<planet>-<id>.json      SectorInfo
+  home.json                    current home sector
+  unlocks.json                 shared research
+  moderators.json              moderator names
+  notes.json                   custom sector names/notes
+  history.json                 campaign log
+  requests/                    transient launch/accelerator requests
 ```
 
-## Сборка из исходников
+Back up `campaign/` — it is the whole campaign.
+
+---
+
+## Commands
+
+**In-game client**
+
+| Key / command | Action |
+|---|---|
+| `N` | Sector map |
+| `F9` | Campaign server launcher |
+| `Space` | Pause / resume (moderators) |
+| `Ctrl+S` | Snapshot now (moderators) |
+| `Escape → “Покинуть”` | Abandon sector (moderators) |
+
+**Chat commands**
+
+| Command | Action |
+|---|---|
+| `/pause` | Pause / resume (moderators) |
+| `/speed <x>` | Game speed, e.g. `4` or `0.5` (moderators) |
+| `/abandon` | Abandon sector (moderators) |
+| `/anyresearch ...` | Client half of Any Research |
+
+**Server console**
+
+| Command | Action |
+|---|---|
+| `mpsave` | Save the current sector |
+| `mpsnapshot` | Snapshot the campaign now |
+| `mpmod add\|remove\|list` | Manage moderators |
+| `anyresearch <name>` | Research a node (admin) |
+| `pause`, `speed <x>`, `abandon` | Campaign controls |
+
+---
+
+## Building from source
 
 ```powershell
-.\fetch.ps1            # libs/server-release.jar
-.\build.ps1            # build/mp-sectors.jar
+# server mod
+.\fetch.ps1
+.\build.ps1                  # build\mp-sectors.jar
 
+# client mod (needs the desktop jar)
+.\fetch.ps1 -Client          # client\libs\Mindustry.jar
 cd client
-.\build.ps1            # client/build/mp-campaign.jar (нужен libs/Mindustry.jar)
+.\build.ps1                  # client\build\mp-campaign.jar
+
+# any-research (client-side)
+cd ..\any-research
+.\build.ps1 -GameJar ..\client\libs\Mindustry.jar
+                             # any-research\build\any-research.jar
 ```
 
-## Ограничения
+The build scripts use `javac --release 17` and `jar` from the JDK.
 
-- Клиентский мод и серверный мод должны быть **одной версии** (`mp-campaign` видимый, версия
-  сверяется при подключении). Обновляя один — обновляйте оба.
-- Глобальный лимит 10 проверяется при высадке; прямой коннект на порт инстанса его обходит.
-- Карта внутри инстанса работает (данные с HTTP API), но «высадиться» на текущий сектор нельзя —
-  вы уже там.
+Create a player-facing zip (mods + scripts + docs):
+
+```powershell
+.\package.ps1 -Version 2.1.0     # dist\MP-Sectors-2.1.0.zip
+```
+
+---
+
+## Networking
+
+- Recommended: **Radmin VPN / ZeroTier / Tailscale**. Players connect to the host's virtual IP.
+- Or forward TCP+UDP `6567` and `6570–6574`, plus HTTP `8090` for the map.
+- The Windows firewall must allow inbound `8090` and the game ports; Radmin is often treated
+  as a “public” network.
+- **Steam networking is off by default.** The Steam provider breaks the dedicated-server
+  handshake; use TCP instead. `mp-sectors.ps1` enables Steam only with `-Steam`.
+- Steam saves are not touched; the campaign is a separate `campaign/` folder.
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Server exits right after start | The Steam JRE is trimmed. Install JDK 17+ and set `JAVA_HOME` or the **Java** field in the launcher. |
+| “Не удалось запустить сектор” | The save has no core or is not a campaign map; land again to regenerate it. Plans are preserved. |
+| Map does not open / “Координатор недоступен” | Check `http://IP:8090/status`, the firewall and the **Адрес** button. |
+| Client and server mod versions differ | Update both `mp-campaign.jar` and `mp-sectors.jar`; the client mod is visible and version-checked. |
+| Chat from other sectors is missing | All players need `mp-campaign.jar` 2.1.0+; the server needs the updated `mp-sectors.jar`. |
+| Snapshot marked “повреждён” | The copy is incomplete; use another snapshot. The coordinator logs the check at startup. |
+
+---
+
+## Links
+
+- [Русский README](README.ru.md)
+- [Full Russian description and changelog](docs/MP-Sectors-полное-описание.txt)
+- [Any Research README (English)](any-research/README.en.md)
+- [Any Research README (Russian)](any-research/README.md)
+- [Client mod README](client/README.md)
+
+## License
+
+No license has been chosen yet. If you plan to redistribute or accept contributions, add one
+(for example MIT) before publishing.

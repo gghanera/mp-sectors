@@ -1,0 +1,24 @@
+#the mod name as displayed in-game
+displayName: "Any Research"
+
+#internal name
+name: "any-research"
+
+author: "GGhanera"
+
+#the fully qualified main class
+main: "anyresearch.AnyResearchMod"
+
+description: "Lets every player who has this mod research tech tree nodes on a server, not only the host. Marked hidden so vanilla clients can still join you, and you can join vanilla servers. Players without the mod cannot research."
+
+version: "1.0.0"
+
+#minimum game build required
+minGameVersion: 160
+
+#hidden mods are excluded from the mod list that is compared on connect,
+#which is what keeps vanilla clients compatible (see Mods.getModStrings).
+#Hidden mods must not add new content - this one adds none.
+hidden: true
+
+java: true

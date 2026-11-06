@@ -1,22 +1,38 @@
-# Downloads the official (non-Steam) Mindustry server build used for compiling and for instances.
+# Downloads the official Mindustry jars used for compiling and for the sector servers.
+#   .\fetch.ps1           server-release.jar (server + coordinator)
+#   .\fetch.ps1 -Client   Mindustry.jar (client mod builds)
+#   .\fetch.ps1 -All      both
 param(
     [string]$Version = "v160.6",
-    [switch]$Force
+    [switch]$Force,
+    [switch]$Client,
+    [switch]$All
 )
 
 $ErrorActionPreference = "Stop"
-$libs = Join-Path $PSScriptRoot "libs"
-$target = Join-Path $libs "server-release.jar"
+$root = $PSScriptRoot
 
-New-Item -ItemType Directory -Force $libs | Out-Null
+function Get-Jar($url, $target){
+    New-Item -ItemType Directory -Force (Split-Path $target) | Out-Null
 
-if((Test-Path $target) -and -not $Force){
-    Write-Host "already present: $target"
-    exit 0
+    if((Test-Path $target) -and -not $Force){
+        Write-Host "already present: $target"
+        return
+    }
+
+    Write-Host "downloading $url ..."
+    curl.exe -fL -o $target $url
+    if($LASTEXITCODE -ne 0){ throw "download failed: $url" }
+
+    Get-Item $target | Select-Object FullName,Length
 }
 
-Write-Host "downloading $Version/server-release.jar ..."
-curl.exe -fL -o $target "https://github.com/Anuken/Mindustry/releases/download/$Version/server-release.jar"
-if($LASTEXITCODE -ne 0){ throw "download failed" }
+$server = Join-Path $root "libs\server-release.jar"
+$client = Join-Path $root "client\libs\Mindustry.jar"
 
-Get-Item $target | Select-Object FullName,Length
+if($All -or -not $Client){
+    Get-Jar "https://github.com/Anuken/Mindustry/releases/download/$Version/server-release.jar" $server
+}
+if($All -or $Client){
+    Get-Jar "https://github.com/Anuken/Mindustry/releases/download/$Version/Mindustry.jar" $client
+}

@@ -3,10 +3,13 @@
 *.zip
 /build/
 /client/build/
+/any-research/build/
 /libs/
 /client/libs/
+/any-research/libs/
 /mods/
 /client-mods/
+/dist/
 
 # Campaign data: personal saves, backups, logs
 /campaign/
