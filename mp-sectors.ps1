@@ -40,6 +40,7 @@ $SectorsDir = Join-Path $Campaign "sectors"
 $InfoDir    = Join-Path $Campaign "info"
 $Instances  = Join-Path $Root "instances"
 $ModJar     = Join-Path $Root "build\mp-sectors.jar"
+if(-not (Test-Path $ModJar)){ $ModJar = Join-Path $Root "mods\mp-sectors.jar" }
 $StateFile  = Join-Path $Root "instances.json"
 
 if(-not $ServerJar){ $ServerJar = Join-Path $Root "libs\server-release.jar" }
