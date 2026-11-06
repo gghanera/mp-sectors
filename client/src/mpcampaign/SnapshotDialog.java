@@ -98,7 +98,7 @@ public class SnapshotDialog extends BaseDialog{
     private void restore(String name){
         Jval body = Jval.newObject();
         body.add("name", name);
-        body.add("player", Vars.player == null ? "" : Vars.player.plainName());
+        body.add("player", MpCampaignMod.localName());
 
         Vars.ui.loadfrag.show("Восстановление кампании...");
         Http.post(MpCampaignMod.url() + "/restore", body, json -> {

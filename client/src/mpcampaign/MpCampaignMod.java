@@ -344,7 +344,7 @@ public class MpCampaignMod extends Mod{
     /** Creates a campaign snapshot now (button in the snapshot dialog and Ctrl+S). */
     public static void saveSnapshot(){
         Jval body = Jval.newObject();
-        body.add("player", Vars.player == null ? "" : Vars.player.plainName());
+        body.add("player", localName());
 
         Http.post(url() + "/snapshot", body, json -> {
             if(json != null && bool(json, "ok")){
@@ -552,7 +552,7 @@ public class MpCampaignMod extends Mod{
         Jval body = Jval.newObject();
         body.add("planet", sector.planet.name);
         body.add("id", Jval.valueOf(sector.id));
-        body.add("player", Vars.player == null ? "" : Vars.player.plainName());
+        body.add("player", localName());
 
         if(withLoadout && from != null){
             try{
@@ -734,7 +734,7 @@ public class MpCampaignMod extends Mod{
         Jval body = Jval.newObject();
         body.add("planet", target.planet.name);
         body.add("id", Jval.valueOf(target.id));
-        body.add("player", Vars.player == null ? "" : Vars.player.plainName());
+        body.add("player", localName());
         body.add("accelerator", Jval.valueOf(true));
         body.add("fromPlanet", from.planet.name);
         body.add("fromId", Jval.valueOf(from.id));
@@ -838,6 +838,13 @@ public class MpCampaignMod extends Mod{
         });
     }
 
+    /** The player name in game, or the configured name in the main menu. */
+    public static String localName(){
+        if(Vars.player != null) return Vars.player.plainName();
+        String name = Core.settings.getString("name", "");
+        return name == null ? "" : name;
+    }
+
     /** Saves the player's own name and note for a sector. */
     public static void saveNote(Sector sector, String title, String note){
         if(sector == null) return;
@@ -845,7 +852,7 @@ public class MpCampaignMod extends Mod{
         Jval body = Jval.newObject();
         body.add("planet", sector.planet.name);
         body.add("id", Jval.valueOf(sector.id));
-        body.add("player", Vars.player == null ? "" : Vars.player.plainName());
+        body.add("player", localName());
         body.add("title", title == null ? "" : title);
         body.add("note", note == null ? "" : note);
 
