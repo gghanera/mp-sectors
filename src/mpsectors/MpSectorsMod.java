@@ -86,9 +86,16 @@ public class MpSectorsMod extends Mod{
             lastChatMessage = e.message;
             lastChatTime = now;
 
+            //the event fires before the vanilla word filter; relay what players will actually see
+            String message = e.message;
+            if(Vars.netServer != null && Vars.netServer.admins != null){
+                message = Vars.netServer.admins.filterMessage(e.player, message);
+                if(message == null || message.isEmpty()) return;
+            }
+
             Sector sector = Vars.state.getSector();
             String key = sector != null ? sector.planet.name + "-" + sector.id : chatSector;
-            Relay.chat(chatPort, key, name, e.message);
+            Relay.chat(chatPort, key, name, message);
         });
         Events.on(WorldLoadEvent.class, e -> {
             if(!instanceMode || runner == null || !runner.loaded) return;

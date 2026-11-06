@@ -138,7 +138,7 @@ MP Sectors — это мод-кампания для Mindustry, которая �
 
 Актуальные размеры файлов на момент описания:
 
-  mp-sectors.jar    75 096 байт
+  mp-sectors.jar    75 166 байт
   mp-campaign.jar   49 102 байт
 
 
@@ -1088,7 +1088,7 @@ Java:            JDK 17+ (используется Liberica JDK 21)
 
 Актуальные jar-файлы:
 
-  mp-sectors.jar    75 096 байт
+  mp-sectors.jar    75 166 байт
   mp-campaign.jar   49 102 байт
 
 Установлены:
