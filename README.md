@@ -320,6 +320,13 @@ Create a player-facing zip (mods + scripts + docs):
 .\package.ps1 -Version 2.1.2     # dist\MP-Sectors-2.1.2.zip
 ```
 
+Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of
+the campaign):
+
+```powershell
+.\test-admin.ps1
+```
+
 ---
 
 ## Networking
