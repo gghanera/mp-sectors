@@ -60,7 +60,7 @@ public class MpSectorsMod extends Mod{
     private static final String acceleratorPacket = "mpcampaign-accelerator";
     private static final String acceleratorAnimPacket = "mpcampaign-accelerator-anim";
     private static final float minSpeed = 0.25f, maxSpeed = 16f;
-    private float gameSpeed = 1f;
+    private static float gameSpeed = 1f;
 
     @Override
     public void init(){
@@ -271,7 +271,7 @@ public class MpSectorsMod extends Mod{
         }
     }
 
-    private void setGameSpeed(float speed){
+    private static void setGameSpeed(float speed){
         //NaN/Infinity would poison Time.delta and freeze the world
         if(!Float.isFinite(speed)) return;
 
@@ -285,6 +285,41 @@ public class MpSectorsMod extends Mod{
         Call.clientPacketReliable(speedPacket, Float.toString(gameSpeed));
     }
 
+    /** Applies a pause/speed command from the coordinator (home) or from campaign/requests (instance). */
+    static void adminCommand(String action, String value){
+        switch(action){
+            case "pause" -> adminPause(Boolean.parseBoolean(value));
+            case "speed" -> {
+                try{
+                    setGameSpeed(Float.parseFloat(value));
+                }catch(NumberFormatException ignored){
+                }
+            }
+            default -> {
+            }
+        }
+    }
+
+    static void adminPause(boolean paused){
+        if(!Vars.state.isGame()) return;
+
+        Vars.state.set(paused ? GameState.State.paused : GameState.State.playing);
+        Call.sendMessage("[accent]Кампания " + (paused ? "на паузе" : "продолжена") + ".");
+        Log.info("[mp-sectors] campaign @ by an admin panel", paused ? "paused" : "resumed");
+    }
+
+    static void adminKick(String name){
+        if(name == null || name.isEmpty()) return;
+
+        for(Player player : Groups.player.copy()){
+            if(player.plainName().equalsIgnoreCase(name)){
+                player.kick(KickReason.kick);
+                Log.info("[mp-sectors] @ kicked from the admin panel", name);
+                return;
+            }
+        }
+    }
+
     private static String speedText(float speed){
         return speed == Math.round(speed) ? "x" + (int)speed : "x" + speed;
     }
@@ -295,10 +330,7 @@ public class MpSectorsMod extends Mod{
             return;
         }
 
-        boolean paused = Vars.state.isPaused();
-        Vars.state.set(paused ? GameState.State.playing : GameState.State.paused);
-        Call.sendMessage("[accent]Кампания " + (paused ? "продолжена" : "на паузе") + ".");
-        Log.info("[mp-sectors] campaign @ by @", paused ? "resumed" : "paused", player == null ? "console" : player.plainName());
+        adminPause(!Vars.state.isPaused());
     }
 
     private void start(){
@@ -578,6 +610,18 @@ public class MpSectorsMod extends Mod{
                         file.delete();
                     }else if(runner.sectorName.equals(req.sector)){
                         if(req.x >= 0 && req.y >= 0) runner.consumeAccelerator(req.x, req.y);
+                        file.delete();
+                    }
+                }else if(name.startsWith("command-")){
+                    Coordinator.CommandRequest req = JsonIO.read(Coordinator.CommandRequest.class, file.readString());
+                    if(req == null || req.time <= 0 || now - req.time > 120_000L){
+                        file.delete();
+                    }else if(runner.sectorName.equals(req.sector)){
+                        if("kick".equals(req.action)){
+                            adminKick(req.value);
+                        }else{
+                            adminCommand(req.action, req.value);
+                        }
                         file.delete();
                     }
                 }

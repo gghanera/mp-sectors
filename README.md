@@ -176,6 +176,29 @@ Moderators can pause, change speed, abandon sectors and manage snapshots. The li
   and on the server;
 - regular players cannot pause, change speed, abandon a sector or restore snapshots.
 
+### Admin panel (moderators)
+
+`mp-campaign` 2.1.2+ adds an in-game admin panel: press **F10** or use the **«Админка»**
+button on the campaign map. It talks to the coordinator's `POST /admin` and checks the player
+name against `campaign\moderators.json`.
+
+From the panel a moderator can:
+
+- **pause / resume** the home sector and every running sector at once;
+- set the campaign **speed** to `x0.5`, `x1`, `x2` or `x4`;
+- create a **snapshot** without leaving the game;
+- **stop** a running sector (it is saved first, players are disconnected);
+- **kick** a player from the home or any running sector;
+- **add or remove moderators**;
+- read the last 150 lines of the coordinator or a sector **log**.
+
+Pause, speed and kick are relayed through `campaign\requests`: the coordinator writes a command
+and each instance reads it within ~2 seconds, so the panel does not need direct access to the
+sector ports. Moderator actions are written to `campaign\history.json`.
+
+The HTTP API still has no token, so the panel is meant for a trusted network
+(Radmin/VPN/LAN). Do not expose port `8090` to the internet.
+
 ### Map UI
 
 - **Sector stats**: wave, core items/capacity, production, imports and exports per minute.
@@ -294,7 +317,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.1.1     # dist\MP-Sectors-2.1.1.zip
+.\package.ps1 -Version 2.1.2     # dist\MP-Sectors-2.1.2.zip
 ```
 
 ---

@@ -167,6 +167,9 @@ public class LobbyDialog extends PlanetDialog{
             row.button("Атака", Icon.warning, () -> showSectorList("attack")).width(100f);
             row.button("Открытые", Icon.lock, () -> showSectorList("allowed")).width(130f);
             row.button("История", Icon.list, this::showHistory).width(130f);
+            if(MpCampaignMod.isModerator()){
+                row.button("Админка", Icon.admin, MpCampaignMod::openAdmin).width(130f);
+            }
         }).left().row();
 
         panel.add("[green]■ база   [scarlet]■ атака   [lightgray]■ не открыт   [accent]■ вы здесь").left().row();

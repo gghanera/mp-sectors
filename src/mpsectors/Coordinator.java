@@ -137,6 +137,17 @@ public class Coordinator{
         public String player = "";
     }
 
+    /** One moderator action from the in-game admin panel. */
+    public static class AdminRequest{
+        public String player = "", action = "", sector = "", name = "", value = "";
+    }
+
+    /** A pause/speed/kick command relayed from the coordinator to one sector instance. */
+    public static class CommandRequest{
+        public String sector = "", action = "", value = "";
+        public long time;
+    }
+
     /** One chat line relayed between the sector servers. */
     public static class ChatMessage{
         public long id, time;
@@ -173,6 +184,7 @@ public class Coordinator{
     private volatile String homeSector;
     private volatile String pendingHome;
     private volatile int homePlayers;
+    private volatile String[] homePlayerNames = {};
     private long lastAutosave;
     private long lastImportRefresh;
     private HttpServer http;
@@ -280,7 +292,13 @@ public class Coordinator{
             return;
         }
 
-        homePlayers = Groups.player.size();
+        var players = Groups.player.copy();
+        homePlayers = players.size;
+        String[] names = new String[players.size];
+        for(int i = 0; i < players.size; i++){
+            names[i] = players.get(i).plainName();
+        }
+        homePlayerNames = names;
 
         instances.tick();
 
@@ -410,6 +428,11 @@ public class Coordinator{
             return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
         }
 
+        return snapshotBlocking();
+    }
+
+    /** Creates a snapshot on the game thread and waits for it (called from an HTTP thread). */
+    private String snapshotBlocking(){
         CountDownLatch latch = new CountDownLatch(1);
         Core.app.post(() -> {
             try{
@@ -869,6 +892,137 @@ public class Coordinator{
         return "{\"ok\":true}";
     }
 
+    /** Moderator controls: pause/speed, stop a sector, kick a player, manage moderators, read logs. */
+    private String adminJson(HttpExchange ex) throws IOException{
+        AdminRequest req = JsonIO.read(AdminRequest.class, body(ex));
+
+        if(req == null || !Moderators.isModerator(req.player)){
+            return "{\"ok\":false,\"error\":\"Действие доступно только модераторам кампании.\"}";
+        }
+        if(restoring && !req.action.equals("log")){
+            return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
+        }
+
+        switch(req.action){
+            case "pause" -> {
+                boolean paused = !("false".equalsIgnoreCase(req.value) || "off".equalsIgnoreCase(req.value) || "0".equals(req.value));
+                broadcastCommand("pause", paused ? "true" : "false");
+                addHistory("admin", "", req.player, paused ? "Кампания поставлена на паузу" : "Кампания продолжена");
+                return "{\"ok\":true}";
+            }
+            case "speed" -> {
+                float speed;
+                try{
+                    speed = Float.parseFloat(req.value);
+                }catch(Throwable t){
+                    return "{\"ok\":false,\"error\":\"Неверная скорость.\"}";
+                }
+                if(!Float.isFinite(speed) || speed < 0.25f || speed > 16f){
+                    return "{\"ok\":false,\"error\":\"Скорость должна быть от 0.25 до 16.\"}";
+                }
+                broadcastCommand("speed", Float.toString(speed));
+                addHistory("admin", "", req.player, "Скорость кампании: x" + speed);
+                return "{\"ok\":true}";
+            }
+            case "stop" -> {
+                if(req.sector == null || req.sector.isEmpty() || req.sector.equals(homeSector)){
+                    return "{\"ok\":false,\"error\":\"Домашний сектор нельзя остановить из админки.\"}";
+                }
+                if(instances.get(req.sector) == null){
+                    return "{\"ok\":false,\"error\":\"Этот сектор не запущен.\"}";
+                }
+                instances.stopAsync(req.sector);
+                addHistory("admin", req.sector, req.player, "Сектор остановлен модератором");
+                return "{\"ok\":true}";
+            }
+            case "kick" -> {
+                if(req.name == null || req.name.isBlank()){
+                    return "{\"ok\":false,\"error\":\"Не указан игрок.\"}";
+                }
+                if(req.sector == null || req.sector.isEmpty() || req.sector.equals(homeSector)){
+                    Core.app.post(() -> MpSectorsMod.adminKick(req.name));
+                }else if(instances.get(req.sector) == null){
+                    return "{\"ok\":false,\"error\":\"Этот сектор не запущен.\"}";
+                }else{
+                    command(req.sector, "kick", req.name);
+                }
+                addHistory("admin", req.sector, req.player, "Кик игрока: " + req.name);
+                return "{\"ok\":true}";
+            }
+            case "modadd" -> {
+                if(req.name == null || req.name.isBlank()){
+                    return "{\"ok\":false,\"error\":\"Не указан игрок.\"}";
+                }
+                if(!Moderators.add(req.name)){
+                    return "{\"ok\":false,\"error\":\"Этот игрок уже модератор.\"}";
+                }
+                addHistory("admin", "", req.player, "Модератор добавлен: " + req.name);
+                return "{\"ok\":true}";
+            }
+            case "modremove" -> {
+                if(req.name == null || req.name.isBlank()){
+                    return "{\"ok\":false,\"error\":\"Не указан игрок.\"}";
+                }
+                if(!Moderators.remove(req.name)){
+                    return "{\"ok\":false,\"error\":\"Этот игрок не модератор.\"}";
+                }
+                addHistory("admin", "", req.player, "Модератор снят: " + req.name);
+                return "{\"ok\":true}";
+            }
+            case "snapshot" -> {
+                return snapshotBlocking();
+            }
+            case "log" -> {
+                return logJson(req.sector);
+            }
+            default -> {
+                return "{\"ok\":false,\"error\":\"Неизвестное действие.\"}";
+            }
+        }
+    }
+
+    /** Applies a command to the home at once and asks every running instance to do the same. */
+    private void broadcastCommand(String action, String value){
+        Core.app.post(() -> MpSectorsMod.adminCommand(action, value));
+        for(InstanceManager.Instance inst : instances.all()){
+            command(inst.sector, action, value);
+        }
+    }
+
+    private void command(String sector, String action, String value){
+        writeRequest("command", "{\"sector\":\"" + esc(sector) + "\",\"action\":\"" + esc(action)
+            + "\",\"value\":\"" + esc(value) + "\",\"time\":" + System.currentTimeMillis() + "}");
+    }
+
+    /** Last 150 lines of the coordinator log or one instance's server.log. */
+    private String logJson(String sector){
+        Fi file;
+        if(sector == null || sector.isEmpty() || sector.equals(homeSector)){
+            file = Core.files.local("config/logs/log-0.txt");
+        }else{
+            //only keys of known instances: the client must not be able to read arbitrary files
+            if(instances.get(sector) == null){
+                return "{\"ok\":false,\"error\":\"Этот сектор не запущен.\"}";
+            }
+            file = Core.files.local("instances").child(sector).child("server.log");
+        }
+
+        if(!file.exists()) return "{\"ok\":false,\"error\":\"Лог не найден.\"}";
+
+        try{
+            String[] lines = file.readString().split("\n", -1);
+            int start = Math.max(0, lines.length - 150);
+            StringBuilder out = new StringBuilder();
+            for(int i = start; i < lines.length; i++){
+                out.append(lines[i]).append('\n');
+            }
+            if(out.length() > 30000) out.delete(0, out.length() - 30000);
+            return "{\"ok\":true,\"log\":\"" + esc(out.toString()) + "\"}";
+        }catch(Throwable t){
+            return "{\"ok\":false,\"error\":\"Не удалось прочитать лог.\"}";
+        }
+    }
+
     private Jval readNotes(){
         if(notesFile == null || !notesFile.exists()) return Jval.newObject();
         try{
@@ -1001,6 +1155,7 @@ public class Coordinator{
         http.createContext("/chat", ex -> respond(ex, handle(ex, this::chatJson)));
         http.createContext("/history", ex -> respond(ex, handle(ex, this::historyJson)));
         http.createContext("/note", ex -> respond(ex, handle(ex, this::noteJson)));
+        http.createContext("/admin", ex -> respond(ex, handle(ex, this::adminJson)));
         httpExecutor = Executors.newFixedThreadPool(4);
         http.setExecutor(httpExecutor);
         http.start();
@@ -1414,13 +1569,31 @@ public class Coordinator{
             json.append('"').append(esc(moderators[i])).append('"');
         }
         json.append("],");
+        json.append("\"homePlayers\":[");
+        String[] homeNames = homePlayerNames;
+        for(int i = 0; i < homeNames.length; i++){
+            if(i > 0) json.append(',');
+            json.append('"').append(esc(homeNames[i])).append('"');
+        }
+        json.append("],");
         json.append("\"instances\":[");
         boolean first = true;
         for(InstanceManager.Instance inst : instances.all()){
             if(!first) json.append(',');
             first = false;
             json.append("{\"sector\":\"").append(esc(inst.sector)).append("\",\"port\":").append(inst.port)
-                .append(",\"players\":").append(inst.players).append('}');
+                .append(",\"players\":").append(inst.players).append(",\"names\":[");
+            String[] names = inst.playerNames;
+            if(names != null){
+                boolean firstPlayer = true;
+                for(String name : names){
+                    if(name == null || name.isEmpty()) continue;
+                    if(!firstPlayer) json.append(',');
+                    firstPlayer = false;
+                    json.append('"').append(esc(name)).append('"');
+                }
+            }
+            json.append("]}");
         }
         json.append("]}");
         return json.toString();

@@ -81,6 +81,7 @@ public class MpCampaignMod extends Mod{
     private static Table menuButton;
     private static ServerDialog serverDialog;
     private static SnapshotDialog snapshotDialog;
+    private static AdminDialog adminDialog;
 
     //Time Control bridge: the mod only scales the client, so the speed is mirrored onto the server
     private static final String speedPacket = "mpcampaign-speed";
@@ -178,6 +179,10 @@ public class MpCampaignMod extends Mod{
             openServerDialog();
         }
 
+        if(!Vars.headless && Vars.ui != null && !Core.scene.hasField() && Core.input.keyTap(KeyCode.f10) && isModerator()){
+            openAdmin();
+        }
+
         if(!Vars.headless && Vars.state.isGame() && Vars.player != null
             && isModerator()
             && !Core.scene.hasField() && Core.input.keyTap(KeyCode.space)){
@@ -235,7 +240,7 @@ public class MpCampaignMod extends Mod{
         if(requested != pendingSpeed) setClientSpeed(requested);
     }
 
-    private static boolean isModerator(){
+    public static boolean isModerator(){
         if(Vars.player == null) return false;
 
         String name = Vars.player.plainName();
@@ -344,6 +349,11 @@ public class MpCampaignMod extends Mod{
     public static void openSnapshots(){
         if(snapshotDialog == null) snapshotDialog = new SnapshotDialog();
         snapshotDialog.show();
+    }
+
+    public static void openAdmin(){
+        if(adminDialog == null) adminDialog = new AdminDialog();
+        adminDialog.show();
     }
 
     /** Creates a campaign snapshot now (button in the snapshot dialog and Ctrl+S). */
@@ -992,7 +1002,7 @@ public class MpCampaignMod extends Mod{
         return out == null || out.isNull() ? "" : out.asString();
     }
 
-    private static int num(Jval value, String key, int def){
+    static int num(Jval value, String key, int def){
         Jval out = value == null ? null : value.get(key);
         return out == null || out.isNull() ? def : out.asInt();
     }
