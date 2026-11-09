@@ -81,6 +81,15 @@ try{
     $homeStop = Admin ('{"player":"GGhanera","action":"stop","sector":"' + $status.home + '"}')
     if($homeStop.ok){ Fail 'the home sector was stopped from the admin panel' }
 
+    $added = Admin '{"player":"GGhanera","action":"modadd","name":"TestMod"}'
+    if(-not $added.ok){ Fail 'moderator add failed' }
+
+    $removed = Admin '{"player":"GGhanera","action":"modremove","name":"GGhanera"}'
+    if(-not $removed.ok){ Fail 'moderator remove failed' }
+
+    $last = Admin '{"player":"TestMod","action":"modremove","name":"TestMod"}'
+    if($last.ok){ Fail 'the last moderator was removed' }
+
     Write-Host 'PASS: admin endpoint checks' -ForegroundColor Green
 }finally{
     if($proc -ne $null -and -not $proc.HasExited){ $proc.Kill() }
