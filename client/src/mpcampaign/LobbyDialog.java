@@ -7,6 +7,7 @@ import arc.scene.event.InputListener;
 import arc.graphics.Color;
 import arc.scene.event.Touchable;
 import arc.scene.ui.Dialog;
+import arc.scene.ui.ScrollPane;
 import arc.scene.ui.layout.Table;
 import arc.util.serialization.Jval;
 import mindustry.Vars;
@@ -57,6 +58,18 @@ public class LobbyDialog extends PlanetDialog{
                 return entry == null || !entry.allowed;
             }
         });
+
+        //the panel caps depend on the window height; rebuild them after a resize
+        onResize(this::buildOverlay);
+    }
+
+    /** Rebuilds the overlay after fresh data arrives (moderator list, sector stats). */
+    public void refreshOverlay(){
+        //skip while a child dialog (Snapshots, Admin) is on top: rebuilding would add the
+        //overlay above it and cover its buttons
+        if(guest && (Core.scene.getDialog() == null || Core.scene.getDialog() == this)){
+            buildOverlay();
+        }
     }
 
     /** Opens the coordinator's campaign map even when the client is not connected to the server. */
@@ -130,17 +143,27 @@ public class LobbyDialog extends PlanetDialog{
     @Override
     public void act(float delta){
         super.act(delta);
+
+        //only while the campaign map itself is the active dialog: pushing the overlay to the
+        //front unconditionally made it cover Snapshots/Admin dialogs opened from the map.
+        //After a child dialog closes Mindustry sets the current dialog to null, so re-front then.
+        if(Core.scene.getDialog() != null && Core.scene.getDialog() != this) return;
+
         if(top != null && top.parent != null) top.toFront();
         if(bottom != null && bottom.parent != null) bottom.toFront();
     }
 
     private void buildOverlay(){
+        //onResize also fires for the stock planet view; only the campaign map gets this overlay
+        if(!guest) return;
+
         if(top != null) top.remove();
         if(bottom != null) bottom.remove();
 
         top = new Table();
         top.setFillParent(true);
-        top.top().left();
+        //right column: the stock planet picker and Back button live bottom-left
+        top.top().right();
         top.touchable = Touchable.childrenOnly;
         top.margin(12f);
 
@@ -149,26 +172,31 @@ public class LobbyDialog extends PlanetDialog{
         panel.margin(10f);
 
         panel.add("[accent]КАМПАНИЯ").left().row();
-        panel.label(() -> MpCampaignMod.loading ? "[lightgray]обновление..." : statusText()).color(Color.lightGray).left().row();
+        panel.label(() -> MpCampaignMod.loading ? "[lightgray]обновление..." : statusText())
+            .color(Color.lightGray).width(420f).wrap().left().row();
         panel.add().height(4f).row();
 
         panel.table(row -> {
-            row.defaults().height(42f).padRight(6f);
-            row.button("Обновить", Icon.refresh, () -> MpCampaignMod.refresh(null)).width(150f);
-            row.button("Адрес", Icon.settings, this::editUrl).width(120f);
-            row.button("Снимки", Icon.save, MpCampaignMod::openSnapshots).width(140f);
-            row.button("В лобби", Icon.home, MpCampaignMod::returnToLobby).width(140f);
+            row.defaults().height(40f).padRight(6f);
+            row.button("Обновить", Icon.refresh, () -> MpCampaignMod.refresh(null)).width(110f);
+            row.button("Адрес", Icon.settings, this::editUrl).width(80f);
+            row.button("Снимки", Icon.save, MpCampaignMod::openSnapshots).width(100f);
+            row.button("В лобби", Icon.home, MpCampaignMod::returnToLobby).width(100f);
         }).left().row();
 
         panel.table(row -> {
             row.defaults().height(36f).padRight(6f);
             row.button("Все", Icon.map, () -> showSectorList("all")).width(90f);
-            row.button("Базы", Icon.home, () -> showSectorList("base")).width(100f);
-            row.button("Атака", Icon.warning, () -> showSectorList("attack")).width(100f);
-            row.button("Открытые", Icon.lock, () -> showSectorList("allowed")).width(130f);
-            row.button("История", Icon.list, this::showHistory).width(130f);
+            row.button("Базы", Icon.home, () -> showSectorList("base")).width(90f);
+            row.button("Атака", Icon.warning, () -> showSectorList("attack")).width(90f);
+            row.button("Открытые", Icon.lock, () -> showSectorList("allowed")).width(120f);
+        }).left().row();
+
+        panel.table(row -> {
+            row.defaults().height(36f).padRight(6f);
+            row.button("История", Icon.list, this::showHistory).width(120f);
             if(MpCampaignMod.isModerator()){
-                row.button("Админка", Icon.admin, MpCampaignMod::openAdmin).width(130f);
+                row.button("Админка", Icon.admin, MpCampaignMod::openAdmin).width(120f);
             }
         }).left().row();
 
@@ -177,7 +205,21 @@ public class LobbyDialog extends PlanetDialog{
         panel.button("Пригласить друзей", Icon.host, MpCampaignMod::inviteFriends)
             .height(40f).growX().padTop(6f).left().row();
 
-        top.add(panel).left().top();
+        //independent top/bottom panels must never cover each other on a short screen
+        ScrollPane topPane = new ScrollPane(panel, Styles.smallPane);
+        topPane.setScrollingDisabled(true, false);
+        topPane.setFadeScrollBars(false);
+        topPane.setOverscroll(false, false);
+        topPane.addListener(new InputListener(){
+            @Override
+            public void enter(InputEvent event, float x, float y, int pointer, arc.scene.Element fromActor){
+                Core.scene.setScrollFocus(topPane);
+            }
+        });
+
+        top.add(topPane).right().top()
+            .maxWidth(Math.max(300f, Math.min(520f, Core.graphics.getWidth() - 24f)))
+            .maxHeight(Core.graphics.getHeight() * 0.42f);
         Core.scene.add(top);
 
         bottom = new Table();
@@ -190,22 +232,35 @@ public class LobbyDialog extends PlanetDialog{
         actions.background(Styles.black6);
         actions.margin(10f);
 
-        actions.label(this::selectedText).color(Color.lightGray).left().row();
-        actions.label(this::noteText).color(Color.lightGray).left().row();
-        actions.label(this::statsLine1).color(Color.lightGray).left().row();
-        actions.label(this::statsLine2).color(Color.lightGray).left().row();
+        actions.label(this::selectedText).color(Color.lightGray).width(420f).wrap().left().row();
+        actions.label(this::noteText).color(Color.lightGray).width(420f).wrap().left().row();
+        actions.label(this::statsLine1).color(Color.lightGray).width(420f).wrap().left().row();
+        actions.label(this::statsLine2).color(Color.lightGray).width(420f).wrap().left().row();
 
         actions.table(row -> {
             row.defaults().height(54f).padRight(8f);
-            row.button("Высадиться", Icon.play, () -> MpCampaignMod.land(selected)).width(200f);
-            row.button("Домашний", Icon.home, () -> MpCampaignMod.setHome(selected)).width(180f);
-            row.button("Заметка", Icon.edit, this::editNote).width(160f);
+            row.button("Высадиться", Icon.play, () -> MpCampaignMod.land(selected)).width(160f);
+            row.button("Домашний", Icon.home, () -> MpCampaignMod.setHome(selected)).width(140f);
+            row.button("Заметка", Icon.edit, this::editNote).width(120f);
         }).left().row();
 
         actions.button("Направить пусковые площадки", Icon.upOpen, () -> MpCampaignMod.setLaunchPads(selected))
             .height(46f).growX().padTop(6f).left().row();
 
-        bottom.add(actions).right().bottom();
+        ScrollPane actionsPane = new ScrollPane(actions, Styles.smallPane);
+        actionsPane.setScrollingDisabled(true, false);
+        actionsPane.setFadeScrollBars(false);
+        actionsPane.setOverscroll(false, false);
+        actionsPane.addListener(new InputListener(){
+            @Override
+            public void enter(InputEvent event, float x, float y, int pointer, arc.scene.Element fromActor){
+                Core.scene.setScrollFocus(actionsPane);
+            }
+        });
+
+        bottom.add(actionsPane).right().bottom()
+            .maxWidth(Math.max(300f, Math.min(520f, Core.graphics.getWidth() - 24f)))
+            .maxHeight(Core.graphics.getHeight() * 0.50f);
         Core.scene.add(bottom);
     }
 

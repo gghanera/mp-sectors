@@ -93,9 +93,9 @@ public final class Moderators{
         return true;
     }
 
-    /** @return false if the name was not a moderator. */
+    /** @return false if the name was not a moderator, or if it is the last one. */
     public static synchronized boolean remove(String name){
-        if(name == null) return false;
+        if(name == null || names.size() <= 1) return false;
 
         for(int i = 0; i < names.size(); i++){
             if(names.get(i).equalsIgnoreCase(name)){
@@ -110,7 +110,16 @@ public final class Moderators{
     private static void save(){
         if(file == null) return;
         file.parent().mkdirs();
-        SectorRunner.writeAtomic(file, JsonIO.write(names.toArray(new String[0])));
+
+        //plain JSON with quoted strings: the file is meant to be edited by hand
+        StringBuilder json = new StringBuilder("[");
+        for(int i = 0; i < names.size(); i++){
+            if(i > 0) json.append(',');
+            json.append('"').append(Coordinator.esc(names.get(i))).append('"');
+        }
+        json.append(']');
+
+        SectorRunner.writeAtomic(file, json.toString());
         lastModified = file.lastModified();
     }
 }

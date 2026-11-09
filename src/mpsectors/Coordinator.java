@@ -899,6 +899,7 @@ public class Coordinator{
         if(req == null || !Moderators.isModerator(req.player)){
             return "{\"ok\":false,\"error\":\"Действие доступно только модераторам кампании.\"}";
         }
+        if(req.action == null) req.action = "";
         if(restoring && !req.action.equals("log")){
             return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
         }
@@ -962,6 +963,12 @@ public class Coordinator{
             case "modremove" -> {
                 if(req.name == null || req.name.isBlank()){
                     return "{\"ok\":false,\"error\":\"Не указан игрок.\"}";
+                }
+                if(!Moderators.isModerator(req.name)){
+                    return "{\"ok\":false,\"error\":\"Этот игрок не модератор.\"}";
+                }
+                if(Moderators.list().length <= 1){
+                    return "{\"ok\":false,\"error\":\"Нельзя снять последнего модератора.\"}";
                 }
                 if(!Moderators.remove(req.name)){
                     return "{\"ok\":false,\"error\":\"Этот игрок не модератор.\"}";

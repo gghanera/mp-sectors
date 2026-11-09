@@ -320,7 +320,16 @@ switch($Action){
         $deadline = (Get-Date).AddSeconds(90)
         while((Get-Date) -lt $deadline){
             Start-Sleep -Milliseconds 500
-            if($coordPid -gt 0 -and -not (Get-Process -Id $coordPid -ErrorAction SilentlyContinue)){ break }
+            if($coordPid -gt 0){
+                if(-not (Get-Process -Id $coordPid -ErrorAction SilentlyContinue)){ break }
+            }else{
+                #no pid file: the coordinator's HTTP port disappearing means it is gone
+                try{
+                    Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$HttpPort/status" -TimeoutSec 2 | Out-Null
+                }catch{
+                    break
+                }
+            }
         }
 
         if($coordPid -gt 0 -and (Get-Process -Id $coordPid -ErrorAction SilentlyContinue)){

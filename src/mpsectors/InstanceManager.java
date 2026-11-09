@@ -270,7 +270,7 @@ public class InstanceManager{
     /** Stops in the background, so the HTTP/admin thread never waits for a process. */
     public synchronized void stopAsync(String sector){
         Instance inst = get(sector);
-        if(inst != null) stopAsync(inst);
+        if(inst != null && !inst.stopping) stopAsync(inst);
     }
 
     private void stop(Instance inst){

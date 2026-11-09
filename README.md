@@ -178,9 +178,10 @@ Moderators can pause, change speed, abandon sectors and manage snapshots. The li
 
 ### Admin panel (moderators)
 
-`mp-campaign` 2.1.2+ adds an in-game admin panel: press **F10** or use the **«Админка»**
-button on the campaign map. It talks to the coordinator's `POST /admin` and checks the player
-name against `campaign\moderators.json`.
+`mp-campaign` 2.1.3+ adds an in-game admin panel: press **F10** (also in the main menu,
+where the player entity does not exist yet) or use the **«Админка»** button on the campaign
+map. It talks to the coordinator's `POST /admin` and checks the player name against
+`campaign\moderators.json`.
 
 From the panel a moderator can:
 
@@ -317,7 +318,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.1.2     # dist\MP-Sectors-2.1.2.zip
+.\package.ps1 -Version 2.1.3     # dist\MP-Sectors-2.1.3.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

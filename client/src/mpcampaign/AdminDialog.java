@@ -1,5 +1,6 @@
 package mpcampaign;
 
+import arc.Core;
 import arc.scene.ui.layout.Table;
 import arc.util.serialization.Jval;
 import mindustry.Vars;
@@ -30,7 +31,7 @@ public class AdminDialog extends BaseDialog{
         cont.pane(t -> {
             body = t;
             t.top().left();
-        }).grow().padTop(8f).row();
+        }).grow().padTop(8f).maxHeight(Core.graphics.getHeight() * 0.65f).row();
 
         shown(this::load);
     }
@@ -61,6 +62,14 @@ public class AdminDialog extends BaseDialog{
     }
 
     private void build(Jval sectors, Jval status){
+        //the moderator list can change from this panel; apply it before drawing anything else
+        MpCampaignMod.parseModerators(status);
+        if(!MpCampaignMod.isModerator()){
+            hide();
+            Vars.ui.showInfoFade("[scarlet]Админ-панель доступна только модераторам кампании.");
+            return;
+        }
+
         String home = MpCampaignMod.str(status, "home");
         int players = MpCampaignMod.num(status, "players", 0);
         int running = MpCampaignMod.num(status, "sectors", 1);
@@ -70,18 +79,22 @@ public class AdminDialog extends BaseDialog{
         body.add("[accent]Кампания").left().row();
         body.add("[lightgray]игроки: [white]" + players + "/" + maxPlayers
             + "   [lightgray]секторы: [white]" + running + "/" + maxSectors
-            + "   [lightgray]дом: [white]" + sectorName(sectors, home)).left().row();
+            + "   [lightgray]дом: [white]" + sectorName(sectors, home)).width(500f).wrap().left().row();
         body.add().height(6f).row();
 
         body.table(t -> {
             t.defaults().height(44f).padRight(6f);
             t.button("Пауза", Icon.pause, () -> post("pause", null, null, "true")).width(130f);
             t.button("Продолжить", Icon.play, () -> post("pause", null, null, "false")).width(150f);
+            t.button("Снимок", Icon.save, () -> post("snapshot", null, null, null)).width(140f);
+        }).left().row();
+
+        body.table(t -> {
+            t.defaults().height(40f).padRight(6f);
             t.button("x0.5", () -> post("speed", null, null, "0.5")).width(80f);
             t.button("x1", () -> post("speed", null, null, "1")).width(70f);
             t.button("x2", () -> post("speed", null, null, "2")).width(70f);
             t.button("x4", () -> post("speed", null, null, "4")).width(70f);
-            t.button("Снимок", Icon.save, () -> post("snapshot", null, null, null)).width(140f);
         }).left().row();
 
         // ---- sectors ----
@@ -130,6 +143,7 @@ public class AdminDialog extends BaseDialog{
         body.add(modList).growX().left().row();
 
         Jval moderators = status.get("moderators");
+        int moderatorCount = moderators != null && moderators.isArray() ? moderators.asArray().size : 0;
         if(moderators != null && moderators.isArray()){
             for(Jval value : moderators.asArray()){
                 String name = value.asString();
@@ -137,8 +151,12 @@ public class AdminDialog extends BaseDialog{
 
                 Table row = new Table();
                 row.left();
-                row.add("[white]" + name + "[]").width(280f).left();
-                row.button("Снять", Icon.cancel, () -> confirmRemoveModerator(name)).size(130f, 40f);
+                row.add("[white]" + name + "[]").width(280f).wrap().left();
+                if(moderatorCount > 1){
+                    row.button("Снять", Icon.cancel, () -> confirmRemoveModerator(name)).size(130f, 40f);
+                }else{
+                    row.add("[lightgray]последний[]").width(130f).left();
+                }
                 modList.add(row).growX().left().padBottom(2f).row();
             }
         }
@@ -159,18 +177,18 @@ public class AdminDialog extends BaseDialog{
 
         Table row = new Table();
         row.left();
-        row.add("[accent]" + sectorName(sectors, key) + "[]").width(220f).left();
-        row.add("[lightgray]" + key + "  " + info + "[]").width(210f).left();
-        row.add("[white]" + (count > 0 ? count + " игр." : "пусто")).width(100f).left();
+        row.add("[accent]" + sectorName(sectors, key) + "[]").width(210f).wrap().left();
+        row.add("[lightgray]" + key + "  " + info + "[]").width(190f).left();
+        row.add("[white]" + (count > 0 ? count + " игр." : "пусто")).width(90f).left();
+        row.row();
 
-        row.button("Лог", Icon.list, () -> showLog(key, sectorName(sectors, key))).size(110f, 42f);
-        if(home){
-            row.add().width(170f);
-        }else{
-            row.button("Остановить", Icon.cancel, () -> confirmStop(key, sectorName(sectors, key))).size(170f, 42f);
+        row.button("Лог", Icon.list, () -> showLog(key, sectorName(sectors, key))).size(110f, 38f).left();
+        if(!home){
+            row.button("Остановить", Icon.cancel, () -> confirmStop(key, sectorName(sectors, key)))
+                .size(160f, 38f).padLeft(6f).left();
         }
 
-        list.add(row).growX().left().padBottom(4f).row();
+        list.add(row).growX().left().padBottom(6f).row();
     }
 
     private int addPlayerRows(Table list, Jval names, String sector, Jval sectors){
@@ -184,9 +202,9 @@ public class AdminDialog extends BaseDialog{
 
             Table row = new Table();
             row.left();
-            row.add("[white]" + name + "[]").width(240f).left();
-            row.add("[lightgray]" + sectorName(sectors, sector) + "[]").width(240f).left();
-            row.button("Кик", Icon.cancel, () -> confirmKick(sector, name)).size(120f, 40f);
+            row.add("[white]" + name + "[]").width(200f).wrap().left();
+            row.add("[lightgray]" + sectorName(sectors, sector) + "[]").width(190f).wrap().left();
+            row.button("Кик", Icon.cancel, () -> confirmKick(sector, name)).size(100f, 38f);
             list.add(row).growX().left().padBottom(2f).row();
         }
         return added;
@@ -222,7 +240,9 @@ public class AdminDialog extends BaseDialog{
                 load();
                 //a stopped sector and a kicked player disappear from the list a moment later
                 if("stop".equals(action) || "kick".equals(action)){
-                    arc.util.Timer.schedule(this::load, 2f);
+                    arc.util.Timer.schedule(() -> {
+                        if(isShown()) load();
+                    }, 2f);
                 }
             }else{
                 String error = json == null ? "Координатор недоступен." : MpCampaignMod.str(json, "error");
@@ -248,6 +268,7 @@ public class AdminDialog extends BaseDialog{
 
     private void showLog(String sector, String title){
         BaseDialog dialog = new BaseDialog("Лог: " + title);
+        float logWidth = Math.max(320f, Math.min(700f, Core.graphics.getWidth() - 120f));
 
         Table content = new Table();
         content.top().left();
@@ -273,7 +294,7 @@ public class AdminDialog extends BaseDialog{
                 String text = MpCampaignMod.str(json, "log");
                 if(text.isEmpty()) text = "(пусто)";
                 //the log must be literal: labels would otherwise parse [color] tags in it
-                content.add(text.replace("[", "[[")).growX().left().wrap().pad(4f);
+                content.add(text.replace("[", "[[")).width(logWidth).left().wrap().pad(4f);
             });
         };
 

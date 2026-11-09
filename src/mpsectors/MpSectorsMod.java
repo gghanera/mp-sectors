@@ -183,7 +183,11 @@ public class MpSectorsMod extends Mod{
                 Log.info("[mp-sectors] @ is now a moderator.", args[1]);
                 if(!Moderators.add(args[1])) Log.info("[mp-sectors] @ was already a moderator.", args[1]);
             }else if(args[0].equalsIgnoreCase("remove")){
-                if(Moderators.remove(args[1])){
+                if(!Moderators.isModerator(args[1])){
+                    Log.err("[mp-sectors] @ is not a moderator.", args[1]);
+                }else if(Moderators.list().length <= 1){
+                    Log.err("[mp-sectors] cannot remove the last moderator.");
+                }else if(Moderators.remove(args[1])){
                     Log.info("[mp-sectors] @ is no longer a moderator.", args[1]);
                 }else{
                     Log.err("[mp-sectors] @ is not a moderator.", args[1]);
@@ -305,7 +309,7 @@ public class MpSectorsMod extends Mod{
 
         Vars.state.set(paused ? GameState.State.paused : GameState.State.playing);
         Call.sendMessage("[accent]Кампания " + (paused ? "на паузе" : "продолжена") + ".");
-        Log.info("[mp-sectors] campaign @ by an admin panel", paused ? "paused" : "resumed");
+        Log.info("[mp-sectors] campaign @", paused ? "paused" : "resumed");
     }
 
     static void adminKick(String name){
@@ -592,6 +596,13 @@ public class MpSectorsMod extends Mod{
         long now = System.currentTimeMillis();
         for(Fi file : dir.list()){
             if(!file.extension().equals("json")) continue;
+
+            //nobody claimed this request in time (the target sector stopped, or the file is
+            //for another sector): drop it instead of leaving it in the folder forever
+            if(now - file.file().lastModified() > 120_000L){
+                file.delete();
+                continue;
+            }
 
             try{
                 String name = file.nameWithoutExtension();

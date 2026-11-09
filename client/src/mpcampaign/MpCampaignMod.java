@@ -241,9 +241,10 @@ public class MpCampaignMod extends Mod{
     }
 
     public static boolean isModerator(){
-        if(Vars.player == null) return false;
+        //in the main menu there is no Player entity, but the panel must still know who we are
+        String name = Vars.player != null ? Vars.player.plainName() : localName();
+        if(name == null || name.isEmpty()) return false;
 
-        String name = Vars.player.plainName();
         if(moderators.isEmpty()) return name.equalsIgnoreCase("GGhanera");
 
         for(String moderator : moderators){
@@ -411,6 +412,12 @@ public class MpCampaignMod extends Mod{
             Http.get(url() + "/status", statusJson -> {
                 if(statusJson != null) parseStatus(statusJson);
                 applyData();
+
+                //keeps the "Админка" button and the status line in sync without reopening the map
+                if(campaignMapOpen && Vars.ui != null && Vars.ui.planet instanceof LobbyDialog lobby){
+                    lobby.refreshOverlay();
+                }
+
                 loading = false;
                 if(done != null) done.run();
             });
@@ -461,7 +468,7 @@ public class MpCampaignMod extends Mod{
     }
 
     /** Keeps the moderator list (and player counts) fresh while playing. */
-    private static void parseModerators(Jval root){
+    static void parseModerators(Jval root){
         Jval mods = root == null ? null : root.get("moderators");
         if(mods == null || !mods.isArray()) return;
 
