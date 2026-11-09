@@ -218,8 +218,10 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   selected sector; running instances pick the change up in ~2 seconds.
 - **Time Control** (`sk7725timecontrol`) is mirrored onto the server: the speed slider
   changes the world for everyone in that sector.
-- **Pause** (`Space` / `/pause`), **abandon** (`/abandon` or the pause-menu button), and the
-  vanilla **Interplanetary Accelerator** are supported.
+- **Pause** (`Space` / `/pause`), **pause all** (`/pauseall` / `/resumeall`), **abandon**
+  (`/abandon` or the pause-menu button), and the vanilla **Interplanetary Accelerator** are
+  supported. Pause-all freezes the home and every running sector and blocks landing on new
+  sectors until `/resumeall`; returning to the home lobby is still allowed.
 - **Two windows on one PC** for testing: duplicate clients are allowed by default.
 
 ---
@@ -279,6 +281,8 @@ Back up `campaign/` — it is the whole campaign.
 | Command | Action |
 |---|---|
 | `/pause` | Pause / resume (moderators) |
+| `/pauseall` | Pause the whole campaign and block landings (moderators) |
+| `/resumeall` | Resume the whole campaign (moderators) |
 | `/speed <x>` | Game speed, e.g. `4` or `0.5` (moderators) |
 | `/abandon` | Abandon sector (moderators) |
 | `/anyresearch ...` | Client half of Any Research |
@@ -291,7 +295,7 @@ Back up `campaign/` — it is the whole campaign.
 | `mpsnapshot` | Snapshot the campaign now |
 | `mpmod add\|remove\|list` | Manage moderators |
 | `anyresearch <name>` | Research a node (admin) |
-| `pause`, `speed <x>`, `abandon` | Campaign controls |
+| `pause`, `pauseall`, `resumeall`, `speed <x>`, `abandon` | Campaign controls |
 
 ---
 
@@ -318,7 +322,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.1.3     # dist\MP-Sectors-2.1.3.zip
+.\package.ps1 -Version 2.1.4     # dist\MP-Sectors-2.1.4.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

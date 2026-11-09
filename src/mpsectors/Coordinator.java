@@ -193,6 +193,8 @@ public class Coordinator{
     private Fi snapshotsDir;
     private Fi dailyDir;
     private volatile boolean restoring;
+    /** Campaign-wide pause: no landing on new sectors while true. */
+    private volatile boolean paused;
     private long lastSnapshot;
     private static final int maxSnapshots = 50;
     private static final int maxDailySnapshots = 7;
@@ -260,6 +262,10 @@ public class Coordinator{
             Vars.netServer.admins.setPlayerLimit(config.maxPlayers);
             Vars.netServer.openServer();
 
+            //a campaign paused before a coordinator restart stays paused
+            paused = campaign.child("paused.flag").exists();
+            if(paused) MpSectorsMod.adminPause(true);
+
             lastAutosave = System.currentTimeMillis();
             lastImportRefresh = System.currentTimeMillis();
             snapshotsDir = (config.snapshotDir == null || config.snapshotDir.isEmpty())
@@ -308,7 +314,7 @@ public class Coordinator{
             if(home != null && home.loaded) home.refreshImportRates();
         }
 
-        if(!restoring && pendingHome != null && homePlayers == 0){
+        if(!restoring && !paused && pendingHome != null && homePlayers == 0){
             switchHome(pendingHome);
             pendingHome = null;
         }
@@ -564,6 +570,7 @@ public class Coordinator{
             //the old world is gone after logic.reset(); never autosave it over the snapshot
             if(home != null) home.loaded = false;
             pendingHome = null;
+            paused = campaign.child("paused.flag").exists();
 
             for(Player player : Groups.player.copy()){
                 player.kick(KickReason.serverRestarting);
@@ -603,6 +610,7 @@ public class Coordinator{
             }catch(Throwable t){
                 Log.err("[mp-sectors] could not reopen the game server", t);
             }
+            if(paused) MpSectorsMod.adminPause(true);
 
             Log.info("[mp-sectors] campaign restored, home=@", key);
         }catch(Throwable t){
@@ -907,8 +915,7 @@ public class Coordinator{
         switch(req.action){
             case "pause" -> {
                 boolean paused = !("false".equalsIgnoreCase(req.value) || "off".equalsIgnoreCase(req.value) || "0".equals(req.value));
-                broadcastCommand("pause", paused ? "true" : "false");
-                addHistory("admin", "", req.player, paused ? "Кампания поставлена на паузу" : "Кампания продолжена");
+                setPaused(paused, req.player);
                 return "{\"ok\":true}";
             }
             case "speed" -> {
@@ -1117,6 +1124,26 @@ public class Coordinator{
         takeSnapshot();
     }
 
+    public boolean isPaused(){
+        return paused;
+    }
+
+    /** Pauses/resumes the home and every running sector and blocks new landings while paused. */
+    public synchronized void setPaused(boolean paused, String player){
+        this.paused = paused;
+
+        Fi flag = campaign.child("paused.flag");
+        if(paused){
+            SectorRunner.writeAtomic(flag, "1");
+        }else if(flag.exists()){
+            flag.delete();
+        }
+
+        broadcastCommand("pause", paused ? "true" : "false");
+        addHistory("admin", "", player == null ? "" : player, paused ? "Кампания на паузе" : "Кампания продолжена");
+        Log.info("[mp-sectors] campaign paused=@", paused);
+    }
+
     /** The home sector's core was destroyed: keep the save, mark it unowned, stop autosaving it. */
     public void homeLost(){
         if(home == null || !home.loaded) return;
@@ -1242,6 +1269,7 @@ public class Coordinator{
         json.append("\"maxSectors\":").append(config.maxSectors).append(',');
         json.append("\"maxPlayers\":").append(config.maxPlayers).append(',');
         json.append("\"players\":").append(out.players).append(',');
+        json.append("\"paused\":").append(paused).append(',');
         json.append("\"steamHost\":\"").append(esc(steamHost())).append("\",");
         json.append("\"steamId\":").append(SteamSupport.steamId()).append(',');
         json.append("\"moderators\":[");
@@ -1319,6 +1347,13 @@ public class Coordinator{
         }
 
         String key = req.planet + "-" + req.id;
+
+        //a paused campaign still lets players return to the home lobby, but starts no new sector
+        if(paused && !key.equals(homeSector)){
+            out.error = "Кампания на паузе: высадка на секторы запрещена.";
+            return landJson(out);
+        }
+
         Snapshot snap = snapshot();
 
         //the interplanetary accelerator is the vanilla way to reach a new planet for the first time
@@ -1489,6 +1524,7 @@ public class Coordinator{
         if(sector == null) return "{\"ok\":false,\"error\":\"Нет такого сектора.\"}";
 
         if(restoring) return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
+        if(paused) return "{\"ok\":false,\"error\":\"Кампания на паузе: смена дома запрещена.\"}";
 
         String key = req.planet + "-" + req.id;
 
@@ -1569,6 +1605,7 @@ public class Coordinator{
         json.append("\"sectors\":").append(out.sectors).append(',');
         json.append("\"maxSectors\":").append(config.maxSectors).append(',');
         json.append("\"maxPlayers\":").append(config.maxPlayers).append(',');
+        json.append("\"paused\":").append(paused).append(',');
         json.append("\"moderators\":[");
         String[] moderators = Moderators.list();
         for(int i = 0; i < moderators.length; i++){

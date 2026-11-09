@@ -62,8 +62,8 @@ public class AdminDialog extends BaseDialog{
     }
 
     private void build(Jval sectors, Jval status){
-        //the moderator list can change from this panel; apply it before drawing anything else
-        MpCampaignMod.parseModerators(status);
+        //the moderator list and the pause flag can change from this panel; apply them first
+        MpCampaignMod.parseStatus(status);
         if(!MpCampaignMod.isModerator()){
             hide();
             Vars.ui.showInfoFade("[scarlet]Админ-панель доступна только модераторам кампании.");
@@ -79,7 +79,9 @@ public class AdminDialog extends BaseDialog{
         body.add("[accent]Кампания").left().row();
         body.add("[lightgray]игроки: [white]" + players + "/" + maxPlayers
             + "   [lightgray]секторы: [white]" + running + "/" + maxSectors
-            + "   [lightgray]дом: [white]" + sectorName(sectors, home)).width(500f).wrap().left().row();
+            + "   [lightgray]дом: [white]" + sectorName(sectors, home)
+            + "   [lightgray]режим: " + (MpCampaignMod.paused ? "[scarlet]пауза[]" : "[green]идёт[]"))
+            .width(500f).wrap().left().row();
         body.add().height(6f).row();
 
         body.table(t -> {

@@ -239,7 +239,8 @@ public class LobbyDialog extends PlanetDialog{
 
         actions.table(row -> {
             row.defaults().height(54f).padRight(8f);
-            row.button("Высадиться", Icon.play, () -> MpCampaignMod.land(selected)).width(160f);
+            row.button("Высадиться", Icon.play, () -> MpCampaignMod.land(selected)).width(160f)
+                .disabled(b -> MpCampaignMod.paused && !MpCampaignMod.isHome(selected));
             row.button("Домашний", Icon.home, () -> MpCampaignMod.setHome(selected)).width(140f);
             row.button("Заметка", Icon.edit, this::editNote).width(120f);
         }).left().row();
@@ -270,7 +271,8 @@ public class LobbyDialog extends PlanetDialog{
         }
 
         String homeName = homeName();
-        return "[lightgray]игроки: [white]" + MpCampaignMod.players + "/" + MpCampaignMod.maxPlayers
+        return (MpCampaignMod.paused ? "[scarlet]ПАУЗА  []" : "")
+            + "[lightgray]игроки: [white]" + MpCampaignMod.players + "/" + MpCampaignMod.maxPlayers
             + "   [lightgray]секторы: [white]" + MpCampaignMod.sectors + "/" + MpCampaignMod.maxSectors
             + "   [lightgray]дом: [white]" + homeName;
     }

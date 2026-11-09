@@ -30,6 +30,11 @@ import mindustry.type.Planet;
 import mindustry.type.Sector;
 import mindustry.world.blocks.LaunchAnimator;
 
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+
 /**
  * MP Sectors - one campaign sector per server process.
  *
@@ -158,6 +163,10 @@ public class MpSectorsMod extends Mod{
 
         handler.register("pause", "Toggle campaign pause.", args -> togglePause(null));
 
+        handler.register("pauseall", "Pause the home and every running sector; block new landings.", args -> pauseAll(null, true));
+
+        handler.register("resumeall", "Resume the home and every running sector.", args -> pauseAll(null, false));
+
         handler.register("speed", "<x>", "Set campaign game speed, e.g. 4 or 0.5.", args -> {
             try{
                 setGameSpeed(Float.parseFloat(args[0]));
@@ -203,6 +212,8 @@ public class MpSectorsMod extends Mod{
         //server half of Any Research: guests cannot research on a dedicated server otherwise
         ResearchServer.register(handler);
         handler.<Player>register("pause", "Поставить или снять паузу (модераторы).", (args, player) -> togglePause(player));
+        handler.<Player>register("pauseall", "Поставить всю кампанию на паузу и запретить высадку (модераторы).", (args, player) -> pauseAll(player, true));
+        handler.<Player>register("resumeall", "Снять паузу со всей кампании (модераторы).", (args, player) -> pauseAll(player, false));
         handler.<Player>register("speed", "<x>", "Скорость игры: 4, 0.5 и т.д. (модераторы).", (args, player) -> {
             if(player != null && !Moderators.isModerator(player.plainName())){
                 player.sendMessage("[scarlet]Только модераторы могут менять скорость игры.");
@@ -305,10 +316,17 @@ public class MpSectorsMod extends Mod{
     }
 
     static void adminPause(boolean paused){
+        adminPause(paused, true);
+    }
+
+    static void adminPause(boolean paused, boolean announce){
         if(!Vars.state.isGame()) return;
 
+        boolean changed = Vars.state.isPaused() != paused;
         Vars.state.set(paused ? GameState.State.paused : GameState.State.playing);
-        Call.sendMessage("[accent]Кампания " + (paused ? "на паузе" : "продолжена") + ".");
+        if(announce && changed){
+            Call.sendMessage("[accent]Кампания " + (paused ? "на паузе" : "продолжена") + ".");
+        }
         Log.info("[mp-sectors] campaign @", paused ? "paused" : "resumed");
     }
 
@@ -335,6 +353,74 @@ public class MpSectorsMod extends Mod{
         }
 
         adminPause(!Vars.state.isPaused());
+    }
+
+    /** Pauses/resumes the whole campaign: the coordinator does it directly, an instance asks it over HTTP. */
+    private void pauseAll(@arc.util.Nullable Player player, boolean paused){
+        if(player != null && !Moderators.isModerator(player.plainName())){
+            player.sendMessage("[scarlet]Только модераторы могут управлять паузой кампании.");
+            return;
+        }
+
+        if(coordinator != null){
+            coordinator.setPaused(paused, player == null ? "console" : player.plainName());
+            return;
+        }
+
+        if(chatPort <= 0){
+            if(player != null) player.sendMessage("[scarlet]Это не сервер кампании.");
+            return;
+        }
+
+        String name = player == null ? firstModerator() : player.plainName();
+        String body = "{\"player\":\"" + Coordinator.esc(name) + "\",\"action\":\"pause\",\"value\":\""
+            + (paused ? "true" : "false") + "\"}";
+
+        Thread thread = new Thread(() -> {
+            try{
+                HttpURLConnection connection = (HttpURLConnection)new URL("http://127.0.0.1:" + chatPort + "/admin").openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(4000);
+                connection.setReadTimeout(15000);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+
+                byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+                connection.setFixedLengthStreamingMode(bytes.length);
+                try(OutputStream out = connection.getOutputStream()){
+                    out.write(bytes);
+                }
+
+                String response = new String(connection.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                connection.disconnect();
+
+                if(!response.contains("\"ok\":true")){
+                    Log.err("[mp-sectors] pauseall rejected: @", response);
+                    reply(player, "[scarlet]Не удалось изменить паузу кампании.");
+                }else{
+                    //apply immediately in this sector too; the coordinator also queues a command
+                    Core.app.post(() -> adminPause(paused, true));
+                }
+            }catch(Throwable t){
+                Log.err("[mp-sectors] pauseall request failed", t);
+                reply(player, "[scarlet]Координатор недоступен.");
+            }
+        }, "mp-sectors-pauseall");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private static String firstModerator(){
+        String[] moderators = Moderators.list();
+        return moderators.length == 0 ? "console" : moderators[0];
+    }
+
+    private static void reply(@arc.util.Nullable Player player, String message){
+        if(player != null){
+            Core.app.post(() -> {
+                if(player.con != null) player.sendMessage(message);
+            });
+        }
     }
 
     private void start(){
@@ -446,6 +532,12 @@ public class MpSectorsMod extends Mod{
             Vars.netServer.openServer();
 
             instanceMode = true;
+
+            //a sector that somehow started while the campaign is paused must not run
+            if(Core.files.absolute(instanceConfig.campaign).child("paused.flag").exists()){
+                adminPause(true);
+            }
+
             lastAutosave = System.currentTimeMillis();
             lastStatus = 0;
             writeStatus();

@@ -74,6 +74,8 @@ public class MpCampaignMod extends Mod{
     public static String steamHost = "";
     public static int players, sectors, maxSectors = 5, maxPlayers = 10;
     public static boolean loading, online;
+    /** Campaign-wide pause: landing on a non-home sector is blocked. */
+    public static boolean paused;
     public static boolean campaignMapOpen;
     public static String lastError = "";
 
@@ -430,6 +432,7 @@ public class MpCampaignMod extends Mod{
         maxSectors = num(root, "maxSectors", 5);
         maxPlayers = num(root, "maxPlayers", 10);
         players = num(root, "players", 0);
+        paused = bool(root, "paused");
 
         entries.clear();
         parseModerators(root);
@@ -458,12 +461,13 @@ public class MpCampaignMod extends Mod{
         }
     }
 
-    private static void parseStatus(Jval root){
+    static void parseStatus(Jval root){
         home = str(root, "home");
         players = num(root, "players", players);
         sectors = num(root, "sectors", 1);
         maxSectors = num(root, "maxSectors", maxSectors);
         maxPlayers = num(root, "maxPlayers", maxPlayers);
+        paused = bool(root, "paused");
         parseModerators(root);
     }
 
@@ -574,6 +578,11 @@ public class MpCampaignMod extends Mod{
     public static void land(Sector sector){
         if(sector == null) return;
 
+        if(paused && !isHome(sector)){
+            Vars.ui.showInfoFade("[scarlet]Кампания на паузе: высадка на секторы запрещена.");
+            return;
+        }
+
         Entry entry = entry(sector);
         if(entry == null){
             Vars.ui.showInfoFade("[scarlet]Сектор ещё не загружен с координатора.");
@@ -606,6 +615,11 @@ public class MpCampaignMod extends Mod{
         }
 
         sendLand(sector, source, false);
+    }
+
+    /** @return whether this sector is the campaign home (the lobby); landings there are allowed while paused. */
+    public static boolean isHome(Sector sector){
+        return sector != null && (sector.planet.name + "-" + sector.id).equals(home);
     }
 
     /** Resolves a sector key like "serpulo-76"; used when the map is open from the main menu. */
