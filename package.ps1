@@ -35,6 +35,7 @@ Copy-Item $mindustryJar (Join-Path $stage "libs\server-release.jar")
 Copy-Item (Join-Path $root "mp-sectors.ps1") $stage
 Copy-Item (Join-Path $root "fetch.ps1") $stage
 Copy-Item (Join-Path $root "build.ps1") $stage
+Copy-Item (Join-Path $root "test-admin.ps1") $stage
 Copy-Item (Join-Path $root "mod.hjson") $stage
 Copy-Item (Join-Path $root "README.md") $stage
 Copy-Item (Join-Path $root "README.ru.md") $stage
