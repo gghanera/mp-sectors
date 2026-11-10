@@ -30,7 +30,7 @@ public class SnapshotDialog extends BaseDialog{
         cont.pane(t -> {
             list = t;
             t.top().left();
-        }).grow().padTop(8f).row();
+        }).grow().padTop(8f).maxHeight(Core.graphics.getHeight() * 0.65f).row();
 
         shown(this::load);
     }
@@ -66,27 +66,126 @@ public class SnapshotDialog extends BaseDialog{
                 boolean beforeRestore = MpCampaignMod.bool(value, "beforeRestore");
                 boolean valid = !value.has("valid") || MpCampaignMod.bool(value, "valid");
 
+                String comment = MpCampaignMod.str(value, "comment");
+
                 Table row = new Table();
                 row.left();
-                row.add("[accent]" + name + "[]").width(190f).left();
-                row.add("[lightgray]" + new SimpleDateFormat("dd.MM.yyyy HH:mm").format(new Date(time)) + "[]").width(170f).left();
-                row.add("[lightgray]" + Strings.format("%.1f МБ", size / 1024f / 1024f) + "[]").width(110f).left();
+                row.add("[accent]" + name + "[]").width(170f).left();
+                row.add("[lightgray]" + new SimpleDateFormat("dd.MM.yyyy HH:mm").format(new Date(time)) + "[]").width(140f).left();
+                row.add("[lightgray]" + Strings.format("%.1f МБ", size / 1024f / 1024f) + "[]").width(80f).left();
 
-                if(daily) row.add("[cyan]дневной[]").width(110f).left();
-                else if(beforeRestore) row.add("[orange]перед откатом[]").width(140f).left();
-                else row.add().width(110f);
+                if(daily) row.add("[cyan]дневной[]").width(100f).left();
+                else if(beforeRestore) row.add("[orange]перед откатом[]").width(120f).left();
+                else row.add().width(100f);
 
-                if(!valid) row.add("[scarlet]повреждён[]").width(120f).left();
+                if(!valid) row.add("[scarlet]повреждён[]").width(100f).left();
+                row.row();
 
-                if(valid){
-                    row.button("Загрузить", Icon.upload, () -> confirm(name)).size(160f, 46f).right();
-                }else{
-                    row.button("Загрузить", Icon.upload, () -> {}).size(160f, 46f).right().disabled(true);
-                }
+                row.add(comment.isEmpty() ? "" : "[lightgray]“" + comment + "”[]").width(330f).wrap().left();
+                row.button("Сектор...", Icon.map, () -> showSectors(name)).size(110f, 38f).padLeft(4f);
+                row.button("Комментарий", Icon.edit, () -> editComment(name, comment)).size(130f, 38f).padLeft(4f);
+                row.button("Загрузить", Icon.upload, () -> confirm(name)).size(120f, 38f).padLeft(4f).disabled(!valid);
 
-                list.add(row).growX().left().padBottom(4f).row();
+                list.add(row).growX().left().padBottom(6f).row();
             }
         });
+    }
+
+    private void editComment(String name, String current){
+        Vars.ui.showTextInput("Комментарий к снимку", "Например: перед атакой", 200, current == null ? "" : current, value -> {
+            Jval body = Jval.newObject();
+            body.add("name", name);
+            body.add("player", MpCampaignMod.localName());
+            body.add("comment", value == null ? "" : value);
+
+            Http.post(MpCampaignMod.url() + "/snapshot-comment", body, json -> {
+                if(json != null && MpCampaignMod.bool(json, "ok")){
+                    Vars.ui.showInfoFade("[accent]Комментарий сохранён.");
+                    load();
+                }else{
+                    String error = json == null ? "Координатор недоступен." : MpCampaignMod.str(json, "error");
+                    Vars.ui.showInfoFade("[scarlet]" + (error.isEmpty() ? "Не удалось сохранить комментарий." : error));
+                }
+            });
+        });
+    }
+
+    private void showSectors(String name){
+        Jval body = Jval.newObject();
+        body.add("name", name);
+        body.add("player", MpCampaignMod.localName());
+
+        Http.post(MpCampaignMod.url() + "/snapshot-sectors", body, json -> {
+            if(json == null || !MpCampaignMod.bool(json, "ok")){
+                String error = json == null ? "Координатор недоступен." : MpCampaignMod.str(json, "error");
+                Vars.ui.showInfoFade("[scarlet]" + (error.isEmpty() ? "Не удалось прочитать снимок." : error));
+                return;
+            }
+
+            BaseDialog dialog = new BaseDialog("Сектор из снимка " + name);
+            Jval array = json.get("sectors");
+
+            dialog.cont.pane(t -> {
+                t.top().left();
+                if(array == null || !array.isArray() || array.asArray().isEmpty()){
+                    t.add("[lightgray]В снимке нет секторов.").left().row();
+                    return;
+                }
+
+                for(Jval value : array.asArray()){
+                    String key = value.asString();
+                    t.table(row -> {
+                        row.left();
+                        row.add("[accent]" + label(key) + "[]").width(240f).left();
+                        row.add("[lightgray]" + key + "[]").width(180f).left();
+                        if(key.equals(MpCampaignMod.home)){
+                            row.add("[lightgray]домашний — только целиком[]").width(220f).left();
+                        }else{
+                            row.button("Восстановить", Icon.upload, () -> {
+                                dialog.hide();
+                                confirmSector(name, key);
+                            }).size(160f, 40f);
+                        }
+                    }).growX().left().padBottom(3f).row();
+                }
+            }).grow().maxHeight(Core.graphics.getHeight() * 0.65f);
+
+            dialog.addCloseButton();
+            dialog.show();
+        });
+    }
+
+    private void confirmSector(String name, String key){
+        Vars.ui.showConfirm("Восстановить сектор?",
+            "Сектор " + label(key) + " будет заменён из снимка " + name + ". Если он запущен, игроков отключит.",
+            () -> restoreSector(name, key));
+    }
+
+    private void restoreSector(String name, String key){
+        Jval body = Jval.newObject();
+        body.add("name", name);
+        body.add("sector", key);
+        body.add("player", MpCampaignMod.localName());
+
+        Vars.ui.loadfrag.show("Восстановление сектора...");
+        Http.post(MpCampaignMod.url() + "/restore-sector", body, json -> {
+            Vars.ui.loadfrag.hide();
+
+            if(json == null || !MpCampaignMod.bool(json, "ok")){
+                String error = json == null ? "Координатор недоступен." : MpCampaignMod.str(json, "error");
+                Vars.ui.showInfoFade("[scarlet]" + (error.isEmpty() ? "Не удалось восстановить сектор." : error));
+                return;
+            }
+
+            Vars.ui.showInfoFade("[accent]Сектор восстановлен из снимка.");
+            load();
+            MpCampaignMod.refresh(null);
+        });
+    }
+
+    private static String label(String key){
+        MpCampaignMod.Entry entry = MpCampaignMod.entries.get(key);
+        return entry == null ? key : MpCampaignMod.displayName(entry);
     }
 
     private void confirm(String name){

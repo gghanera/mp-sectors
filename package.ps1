@@ -1,7 +1,7 @@
 # Builds a distributable zip: server, mods, scripts and docs.
 # Run the three build scripts first (or let the launcher build the server mod).
 param(
-    [string]$Version = "2.1.4"
+    [string]$Version = "2.2.0"
 )
 
 $ErrorActionPreference = "Stop"

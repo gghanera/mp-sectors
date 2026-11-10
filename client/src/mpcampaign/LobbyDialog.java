@@ -194,6 +194,7 @@ public class LobbyDialog extends PlanetDialog{
 
         panel.table(row -> {
             row.defaults().height(36f).padRight(6f);
+            row.button("Кто где", Icon.players, this::showWho).width(120f);
             row.button("История", Icon.list, this::showHistory).width(120f);
             if(MpCampaignMod.isModerator()){
                 row.button("Админка", Icon.admin, MpCampaignMod::openAdmin).width(120f);
@@ -271,7 +272,12 @@ public class LobbyDialog extends PlanetDialog{
         }
 
         String homeName = homeName();
-        return (MpCampaignMod.paused ? "[scarlet]ПАУЗА  []" : "")
+        String version = MpCampaignMod.versionMismatch()
+            ? "[scarlet]Обнови mp-campaign: сервер " + MpCampaignMod.campaignVersion
+                + ", у тебя " + MpCampaignMod.localVersion() + "[]\n"
+            : "";
+
+        return version + (MpCampaignMod.paused ? "[scarlet]ПАУЗА  []" : "")
             + "[lightgray]игроки: [white]" + MpCampaignMod.players + "/" + MpCampaignMod.maxPlayers
             + "   [lightgray]секторы: [white]" + MpCampaignMod.sectors + "/" + MpCampaignMod.maxSectors
             + "   [lightgray]дом: [white]" + homeName;
@@ -431,6 +437,28 @@ public class LobbyDialog extends PlanetDialog{
             MpCampaignMod.saveNote(sector, title[0], note[0]);
         }).size(180f, 50f);
         dialog.buttons.button("Отмена", dialog::hide).size(140f, 50f);
+        dialog.show();
+    }
+
+    private void showWho(){
+        BaseDialog dialog = new BaseDialog("Кто где");
+
+        dialog.cont.pane(t -> {
+            t.top().left();
+            if(MpCampaignMod.whoLines.length == 0){
+                t.add("[lightgray]Данных пока нет. Нажми «Обновить» на карте.").left().row();
+            }else{
+                for(String line : MpCampaignMod.whoLines){
+                    t.add(line).left().padBottom(2f).row();
+                }
+            }
+        }).grow();
+
+        dialog.buttons.button("Обновить", Icon.refresh, () -> {
+            dialog.hide();
+            MpCampaignMod.refresh(() -> Core.app.post(this::showWho));
+        }).size(170f, 46f);
+        dialog.addCloseButton();
         dialog.show();
     }
 

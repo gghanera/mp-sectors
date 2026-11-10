@@ -3,10 +3,14 @@ package mpsectors;
 import arc.Core;
 import arc.Events;
 import arc.files.Fi;
+import arc.func.Cons;
 import arc.math.Mathf;
+import arc.struct.ObjectMap;
+import arc.struct.Seq;
 import arc.util.CommandHandler;
 import arc.util.Log;
 import arc.util.Time;
+import arc.util.serialization.Jval;
 import mindustry.Vars;
 import mindustry.core.GameState;
 import mindustry.ctype.ContentType;
@@ -56,6 +60,7 @@ public class MpSectorsMod extends Mod{
     private String chatSector = "";
     private String lastChatPlayer = "", lastChatMessage = "";
     private long lastChatTime;
+    private final ObjectMap<String, long[]> chatRates = new ObjectMap<>();
     private long lastAutosave, lastStopCheck, lastStatus;
     private long lastUnlockCheck, lastUnlocksModified;
     private long lastImportRefresh, lastPadsPoll, lastPadsCheck, lastLaunchPoll;
@@ -72,7 +77,14 @@ public class MpSectorsMod extends Mod{
         Events.on(ServerLoadEvent.class, e -> start());
         Events.on(UnlockEvent.class, e -> writeUnlocksIfChanged());
         Events.on(PlayerConnect.class, e -> {
-            Log.info("[mp-sectors] player connected: @", e.player.plainName());
+            String name = e.player.plainName();
+            if(Bans.isBanned(name)){
+                Log.info("[mp-sectors] banned player tried to join: @", name);
+                e.player.kick(KickReason.banned);
+                return;
+            }
+
+            Log.info("[mp-sectors] player connected: @", name);
             if(e.player.con != null) Call.clientPacketReliable(e.player.con, speedPacket, Float.toString(gameSpeed));
         });
         Events.on(PlayerLeave.class, e -> {
@@ -97,6 +109,11 @@ public class MpSectorsMod extends Mod{
             if(Vars.netServer != null && Vars.netServer.admins != null){
                 message = Vars.netServer.admins.filterMessage(e.player, message);
                 if(message == null || message.isEmpty()) return;
+            }
+
+            if(!allowRelayChat(name)){
+                e.player.sendMessage("[scarlet]Слишком много сообщений, подождите.");
+                return;
             }
 
             Sector sector = Vars.state.getSector();
@@ -167,6 +184,16 @@ public class MpSectorsMod extends Mod{
 
         handler.register("resumeall", "Resume the home and every running sector.", args -> pauseAll(null, false));
 
+        handler.register("who", "Show who is in which sector.", args -> who(null));
+
+        handler.register("speedall", "<x>", "Set the speed of the whole campaign.", args -> {
+            try{
+                speedAll(null, Float.parseFloat(args[0]));
+            }catch(NumberFormatException e){
+                Log.err("[mp-sectors] speedall must be a number, e.g. 4 or 0.5");
+            }
+        });
+
         handler.register("speed", "<x>", "Set campaign game speed, e.g. 4 or 0.5.", args -> {
             try{
                 setGameSpeed(Float.parseFloat(args[0]));
@@ -214,6 +241,18 @@ public class MpSectorsMod extends Mod{
         handler.<Player>register("pause", "Поставить или снять паузу (модераторы).", (args, player) -> togglePause(player));
         handler.<Player>register("pauseall", "Поставить всю кампанию на паузу и запретить высадку (модераторы).", (args, player) -> pauseAll(player, true));
         handler.<Player>register("resumeall", "Снять паузу со всей кампании (модераторы).", (args, player) -> pauseAll(player, false));
+        handler.<Player>register("who", "Кто в каком секторе.", (args, player) -> who(player));
+        handler.<Player>register("speedall", "<x>", "Скорость всей кампании: 4, 0.5 и т.д. (модераторы).", (args, player) -> {
+            try{
+                speedAll(player, Float.parseFloat(args[0]));
+            }catch(NumberFormatException e){
+                player.sendMessage("[scarlet]Скорость должна быть числом, например 4 или 0.5.");
+            }
+        });
+        handler.<Player>register("snapshot", "Создать снимок кампании (модераторы).", (args, player) -> snapshotCampaign(player));
+        handler.<Player>register("ban", "<name>", "Забанить игрока во всей кампании (модераторы).", (args, player) -> ban(player, args[0], true));
+        handler.<Player>register("unban", "<name>", "Разбанить игрока во всей кампании (модераторы).", (args, player) -> ban(player, args[0], false));
+        handler.<Player>register("bans", "Список банов кампании.", (args, player) -> listBans(player));
         handler.<Player>register("speed", "<x>", "Скорость игры: 4, 0.5 и т.д. (модераторы).", (args, player) -> {
             if(player != null && !Moderators.isModerator(player.plainName())){
                 player.sendMessage("[scarlet]Только модераторы могут менять скорость игры.");
@@ -290,14 +329,18 @@ public class MpSectorsMod extends Mod{
         //NaN/Infinity would poison Time.delta and freeze the world
         if(!Float.isFinite(speed)) return;
 
-        gameSpeed = Mathf.clamp(speed, minSpeed, maxSpeed);
+        float next = Mathf.clamp(speed, minSpeed, maxSpeed);
+        boolean changed = Math.abs(next - gameSpeed) > 0.001f;
+        gameSpeed = next;
 
         //same formula Time Control uses, so the client and the server stay in step
         Time.setDeltaProvider(() -> Math.min(Core.graphics.getDeltaTime() * 60f * gameSpeed, 3f * gameSpeed));
 
         Log.info("[mp-sectors] game speed x@", gameSpeed);
-        Call.sendMessage("[accent]Скорость игры: " + speedText(gameSpeed));
-        Call.clientPacketReliable(speedPacket, Float.toString(gameSpeed));
+        if(changed){
+            Call.sendMessage("[accent]Скорость игры: " + speedText(gameSpeed));
+            Call.clientPacketReliable(speedPacket, Float.toString(gameSpeed));
+        }
     }
 
     /** Applies a pause/speed command from the coordinator (home) or from campaign/requests (instance). */
@@ -330,16 +373,43 @@ public class MpSectorsMod extends Mod{
         Log.info("[mp-sectors] campaign @", paused ? "paused" : "resumed");
     }
 
+    /** Five relayed lines per ten seconds; the sender's own sector still sees them. */
+    private boolean allowRelayChat(String name){
+        long now = System.currentTimeMillis();
+        synchronized(chatRates){
+            long[] state = chatRates.get(name);
+            if(state == null){
+                state = new long[]{now, 0};
+                chatRates.put(name, state);
+            }
+            if(now - state[0] > 10_000L){
+                state[0] = now;
+                state[1] = 0;
+            }
+            if(state[1] >= 5) return false;
+            state[1]++;
+        }
+        return true;
+    }
+
     static void adminKick(String name){
+        adminKick(name, KickReason.kick);
+    }
+
+    static void adminKick(String name, KickReason reason){
         if(name == null || name.isEmpty()) return;
 
         for(Player player : Groups.player.copy()){
             if(player.plainName().equalsIgnoreCase(name)){
-                player.kick(KickReason.kick);
-                Log.info("[mp-sectors] @ kicked from the admin panel", name);
+                player.kick(reason);
+                Log.info("[mp-sectors] @ kicked (@)", name, reason);
                 return;
             }
         }
+    }
+
+    static void adminBan(String name){
+        adminKick(name, KickReason.banned);
     }
 
     private static String speedText(float speed){
@@ -367,47 +437,205 @@ public class MpSectorsMod extends Mod{
             return;
         }
 
-        if(chatPort <= 0){
-            if(player != null) player.sendMessage("[scarlet]Это не сервер кампании.");
+        postAdmin(player, "pause", null, paused ? "true" : "false", 15000, ok -> {
+            if(ok){
+                //apply at once here too; the coordinator also queues a command
+                adminPause(paused, true);
+            }else{
+                reply(player, "[scarlet]Не удалось изменить паузу кампании.");
+            }
+        });
+    }
+
+    private void speedAll(@arc.util.Nullable Player player, float speed){
+        if(player != null && !Moderators.isModerator(player.plainName())){
+            player.sendMessage("[scarlet]Только модераторы могут менять скорость.");
+            return;
+        }
+        if(!Float.isFinite(speed) || speed < minSpeed || speed > maxSpeed){
+            reply(player, "[scarlet]Скорость должна быть от 0.25 до 16.");
             return;
         }
 
-        String name = player == null ? firstModerator() : player.plainName();
-        String body = "{\"player\":\"" + Coordinator.esc(name) + "\",\"action\":\"pause\",\"value\":\""
-            + (paused ? "true" : "false") + "\"}";
+        if(coordinator != null){
+            coordinator.setSpeedAll(speed, player == null ? "console" : player.plainName());
+            return;
+        }
+
+        postAdmin(player, "speed", null, Float.toString(speed), 15000, ok -> {
+            if(ok){
+                setGameSpeed(speed);
+                reply(player, "[accent]Скорость кампании: " + speedText(speed) + ".");
+            }else{
+                reply(player, "[scarlet]Не удалось изменить скорость кампании.");
+            }
+        });
+    }
+
+    private void snapshotCampaign(@arc.util.Nullable Player player){
+        if(player != null && !Moderators.isModerator(player.plainName())){
+            player.sendMessage("[scarlet]Только модераторы могут создавать снимки.");
+            return;
+        }
+
+        if(coordinator != null){
+            if(coordinator.isRestoring()){
+                reply(player, "[scarlet]Кампания восстанавливается, подождите.");
+                return;
+            }
+            coordinator.snapshotNow();
+            reply(player, "[accent]Снимок кампании создан.");
+            return;
+        }
+
+        postAdmin(player, "snapshot", null, null, 60000, ok -> {
+            reply(player, ok ? "[accent]Снимок кампании создан." : "[scarlet]Не удалось создать снимок.");
+        });
+    }
+
+    private void ban(@arc.util.Nullable Player player, String name, boolean banned){
+        if(player != null && !Moderators.isModerator(player.plainName())){
+            player.sendMessage("[scarlet]Только модераторы могут управлять банами.");
+            return;
+        }
+        if(name == null || name.isBlank()){
+            reply(player, "[scarlet]Укажите ник.");
+            return;
+        }
+        String target = name.trim();
+
+        if(coordinator != null){
+            if(banned) coordinator.ban(target, player == null ? "console" : player.plainName());
+            else coordinator.unban(target, player == null ? "console" : player.plainName());
+            reply(player, banned ? "[accent]Забанен: " + target : "[accent]Разбанен: " + target);
+            return;
+        }
+
+        postAdmin(player, banned ? "ban" : "unban", target, null, 15000, ok -> {
+            if(ok){
+                if(banned){
+                    Bans.add(target);
+                    adminBan(target);
+                }else{
+                    Bans.remove(target);
+                }
+                reply(player, banned ? "[accent]Забанен: " + target : "[accent]Разбанен: " + target);
+            }else{
+                reply(player, "[scarlet]Не удалось изменить бан-лист.");
+            }
+        });
+    }
+
+    private void listBans(@arc.util.Nullable Player player){
+        sendLines(player, coordinator != null ? coordinator.banLines() : localBanLines());
+    }
+
+    private static String[] localBanLines(){
+        String[] bans = Bans.list();
+        if(bans.length == 0) return new String[]{"[lightgray]Банов нет."};
+
+        String[] lines = new String[bans.length + 1];
+        lines[0] = "[accent]Баны (" + bans.length + "):";
+        for(int i = 0; i < bans.length; i++) lines[i + 1] = "[white]" + bans[i];
+        return lines;
+    }
+
+    private void who(@arc.util.Nullable Player player){
+        if(coordinator != null){
+            sendLines(player, coordinator.whoLines());
+            return;
+        }
+        if(chatPort <= 0){
+            reply(player, "[scarlet]Это не сервер кампании.");
+            return;
+        }
 
         Thread thread = new Thread(() -> {
+            HttpURLConnection connection = null;
             try{
-                HttpURLConnection connection = (HttpURLConnection)new URL("http://127.0.0.1:" + chatPort + "/admin").openConnection();
+                connection = (HttpURLConnection)new URL("http://127.0.0.1:" + chatPort + "/status").openConnection();
+                connection.setConnectTimeout(4000);
+                connection.setReadTimeout(8000);
+                String response = new String(connection.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                Jval json = Jval.read(response);
+                Jval array = json == null ? null : json.get("who");
+                Seq<String> lines = new Seq<>();
+                if(array != null && array.isArray()){
+                    for(Jval value : array.asArray()) lines.add(value.asString());
+                }
+                sendLines(player, lines.toArray(String.class));
+            }catch(Throwable t){
+                reply(player, "[scarlet]Координатор недоступен.");
+            }finally{
+                if(connection != null) connection.disconnect();
+            }
+        }, "mp-sectors-who");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /** POST /admin from an instance; the callback runs on the game thread. */
+    private void postAdmin(@arc.util.Nullable Player player, String action, String name, String value,
+                           int timeoutMs, Cons<Boolean> done){
+        if(chatPort <= 0){
+            reply(player, "[scarlet]Это не сервер кампании.");
+            if(done != null) Core.app.post(() -> done.get(false));
+            return;
+        }
+
+        String who = player == null ? firstModerator() : player.plainName();
+        StringBuilder body = new StringBuilder("{\"player\":\"").append(Coordinator.esc(who))
+            .append("\",\"action\":\"").append(Coordinator.esc(action)).append('"');
+        if(name != null) body.append(",\"name\":\"").append(Coordinator.esc(name)).append('"');
+        if(value != null) body.append(",\"value\":\"").append(Coordinator.esc(value)).append('"');
+        body.append('}');
+        String json = body.toString();
+
+        Thread thread = new Thread(() -> {
+            boolean ok = false;
+            HttpURLConnection connection = null;
+            try{
+                connection = (HttpURLConnection)new URL("http://127.0.0.1:" + chatPort + "/admin").openConnection();
                 connection.setRequestMethod("POST");
                 connection.setConnectTimeout(4000);
-                connection.setReadTimeout(15000);
+                connection.setReadTimeout(timeoutMs);
                 connection.setDoOutput(true);
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
 
-                byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+                byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
                 connection.setFixedLengthStreamingMode(bytes.length);
                 try(OutputStream out = connection.getOutputStream()){
                     out.write(bytes);
                 }
 
                 String response = new String(connection.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-                connection.disconnect();
-
-                if(!response.contains("\"ok\":true")){
-                    Log.err("[mp-sectors] pauseall rejected: @", response);
-                    reply(player, "[scarlet]Не удалось изменить паузу кампании.");
-                }else{
-                    //apply immediately in this sector too; the coordinator also queues a command
-                    Core.app.post(() -> adminPause(paused, true));
-                }
+                ok = response.contains("\"ok\":true");
+                if(!ok) Log.err("[mp-sectors] admin @ rejected: @", action, response);
             }catch(Throwable t){
-                Log.err("[mp-sectors] pauseall request failed", t);
-                reply(player, "[scarlet]Координатор недоступен.");
+                Log.err("[mp-sectors] admin @ request failed", action, t);
+            }finally{
+                if(connection != null) connection.disconnect();
             }
-        }, "mp-sectors-pauseall");
+
+            boolean result = ok;
+            if(done != null) Core.app.post(() -> done.get(result));
+        }, "mp-sectors-admin-" + action);
         thread.setDaemon(true);
         thread.start();
+    }
+
+    private static void sendLines(@arc.util.Nullable Player player, String[] lines){
+        if(lines == null) return;
+
+        if(player == null){
+            for(String line : lines) Log.info("[mp-sectors] @", line.replaceAll("\\[[^\\]]*\\]", ""));
+            return;
+        }
+
+        Core.app.post(() -> {
+            if(player.con == null) return;
+            for(String line : lines) player.sendMessage(line);
+        });
     }
 
     private static String firstModerator(){
@@ -486,7 +714,13 @@ public class MpSectorsMod extends Mod{
                 runner.loaded = false;
                 Relay.history(chatPort, "lost", runner.sectorName, "", "Сектор потерян");
             }
-            if(instanceMode) Core.app.exit();
+            if(instanceMode){
+                try{
+                    Core.files.local("exit.reason").writeString("gameover");
+                }catch(Throwable ignored){
+                }
+                Core.app.exit();
+            }
         };
     }
 
@@ -510,6 +744,7 @@ public class MpSectorsMod extends Mod{
 
             ResearchServer.campaignPath = instanceConfig.campaign;
             Moderators.init(Core.files.absolute(instanceConfig.campaign));
+            Bans.init(Core.files.absolute(instanceConfig.campaign));
             chatPort = instanceConfig.httpPort;
             chatSector = instanceConfig.sector;
             runner = new SectorRunner(instanceConfig.campaign, instanceConfig.sector);
@@ -589,6 +824,10 @@ public class MpSectorsMod extends Mod{
                 runner.save();
                 //the shutdown hook would save a second time
                 runner.loaded = false;
+                try{
+                    Core.files.local("exit.reason").writeString("stop");
+                }catch(Throwable ignored){
+                }
                 Core.app.exit();
                 return;
             }
@@ -720,10 +959,14 @@ public class MpSectorsMod extends Mod{
                     if(req == null || req.time <= 0 || now - req.time > 120_000L){
                         file.delete();
                     }else if(runner.sectorName.equals(req.sector)){
-                        if("kick".equals(req.action)){
-                            adminKick(req.value);
-                        }else{
-                            adminCommand(req.action, req.value);
+                        switch(req.action){
+                            case "kick" -> adminKick(req.value);
+                            case "limit" -> adminKick(req.value, KickReason.playerLimit);
+                            case "ban" -> {
+                                Bans.add(req.value);
+                                adminBan(req.value);
+                            }
+                            default -> adminCommand(req.action, req.value);
                         }
                         file.delete();
                     }

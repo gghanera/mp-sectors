@@ -78,8 +78,11 @@ public class MpCampaignMod extends Mod{
     public static boolean paused;
     public static boolean campaignMapOpen;
     public static String lastError = "";
+    public static String serverVersion = "", campaignVersion = "";
+    public static String[] whoLines = {};
 
     private static boolean installed;
+    private static boolean versionWarned;
     private static Table menuButton;
     private static ServerDialog serverDialog;
     private static SnapshotDialog snapshotDialog;
@@ -196,6 +199,16 @@ public class MpCampaignMod extends Mod{
             && !Core.scene.hasField() && Core.input.ctrl() && Core.input.keyTap(KeyCode.s)
             && ((Vars.net != null && Vars.net.client()) || ServerProcess.running())){
             saveSnapshot();
+        }
+
+        if(versionMismatch()){
+            if(!versionWarned && Vars.ui != null){
+                Vars.ui.showInfoFade("[scarlet]Версия mp-campaign не совпадает с сервером: сервер "
+                    + campaignVersion + ", у тебя " + localVersion() + ". Обнови мод.");
+                versionWarned = true;
+            }
+        }else{
+            versionWarned = false;
         }
 
         updateTimeControl();
@@ -468,6 +481,16 @@ public class MpCampaignMod extends Mod{
         maxSectors = num(root, "maxSectors", maxSectors);
         maxPlayers = num(root, "maxPlayers", maxPlayers);
         paused = bool(root, "paused");
+        serverVersion = str(root, "serverVersion");
+        campaignVersion = str(root, "campaignVersion");
+
+        Jval who = root.get("who");
+        if(who != null && who.isArray()){
+            whoLines = new String[who.asArray().size];
+            int i = 0;
+            for(Jval value : who.asArray()) whoLines[i++] = value.asString();
+        }
+
         parseModerators(root);
     }
 
@@ -925,6 +948,21 @@ public class MpCampaignMod extends Mod{
         });
     }
 
+    /** The client mod version, compared with the coordinator's mp-campaign version. */
+    public static String localVersion(){
+        try{
+            var mod = Vars.mods.getMod("mp-campaign");
+            return mod == null || mod.meta == null || mod.meta.version == null ? "" : mod.meta.version;
+        }catch(Throwable t){
+            return "";
+        }
+    }
+
+    public static boolean versionMismatch(){
+        String local = localVersion();
+        return !local.isEmpty() && !campaignVersion.isEmpty() && !local.equals(campaignVersion);
+    }
+
     /** The player name in game, or the configured name in the main menu. */
     public static String localName(){
         if(Vars.player != null) return Vars.player.plainName();
@@ -995,7 +1033,16 @@ public class MpCampaignMod extends Mod{
                     String message = str(value, "message");
                     if(message.isEmpty()) continue;
 
-                    Vars.ui.chatfrag.addMessage("[orange][" + sectorLabel(sector) + "][white] " + player + ": [lightgray]" + message);
+                    //watchdog/player-limit lines from the coordinator
+                    if(sector.isEmpty() || "system".equals(sector)){
+                        Vars.ui.chatfrag.addMessage("[orange]◆ [white]" + message);
+                        if(Vars.ui != null) mindustry.gen.Sounds.uiChat.play();
+                        continue;
+                    }
+
+                    String formatted = highlightMentions(message, localName());
+                    Vars.ui.chatfrag.addMessage("[orange][" + sectorLabel(sector) + "][white] " + player + ": [lightgray]" + formatted);
+                    if(mentions(message, localName())) mindustry.gen.Sounds.uiChat.play();
                 }
             }
 
@@ -1009,11 +1056,36 @@ public class MpCampaignMod extends Mod{
     }
 
     private static String sectorLabel(String key){
+        if(key == null || key.isEmpty() || key.equals("system")) return "Кампания";
+
         Entry entry = entries.get(key);
         if(entry == null) return key;
 
         String name = displayName(entry);
         return name == null || name.isEmpty() ? key : name;
+    }
+
+    private static boolean mentions(String message, String name){
+        return name != null && !name.isEmpty()
+            && message.toLowerCase().contains("@" + name.toLowerCase());
+    }
+
+    private static String highlightMentions(String message, String name){
+        if(name == null || name.isEmpty()) return message;
+
+        try{
+            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(?i)@" + java.util.regex.Pattern.quote(name));
+            java.util.regex.Matcher matcher = pattern.matcher(message);
+            StringBuffer out = new StringBuffer();
+            while(matcher.find()){
+                matcher.appendReplacement(out,
+                    java.util.regex.Matcher.quoteReplacement("[accent]" + matcher.group() + "[lightgray]"));
+            }
+            matcher.appendTail(out);
+            return out.toString();
+        }catch(Throwable t){
+            return message;
+        }
     }
 
     // ---------------- json helpers ----------------

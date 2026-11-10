@@ -2,6 +2,8 @@ package mpsectors;
 
 import arc.Core;
 import arc.files.Fi;
+import arc.func.Cons;
+import arc.struct.ObjectMap;
 import arc.struct.Seq;
 import arc.util.Log;
 import mindustry.Vars;
@@ -54,11 +56,14 @@ public class InstanceManager{
     }
 
     private final Coordinator.Config config;
+    private final Cons<String> notify;
     private final Seq<Instance> instances = new Seq<>();
+    private final ObjectMap<String, long[]> crashCounts = new ObjectMap<>();
     private long lastTick;
 
-    public InstanceManager(Coordinator.Config config){
+    public InstanceManager(Coordinator.Config config, Cons<String> notify){
         this.config = config;
+        this.notify = notify;
     }
 
     public synchronized Seq<Instance> all(){
@@ -151,6 +156,7 @@ public class InstanceManager{
                 //stale files from a previous run: a leftover stop flag would kill the new process
                 dir.child("status.json").delete();
                 dir.child("stop.flag").delete();
+                dir.child("exit.reason").delete();
 
                 out = new Instance(sector, port, dir);
                 out.process = builder.start();
@@ -218,8 +224,17 @@ public class InstanceManager{
             if(inst.stopping) continue;
 
             if(inst.process != null && !inst.process.isAlive()){
-                Log.info("[mp-sectors] instance @ exited", inst.sector);
+                String reason = readExitReason(inst);
                 instances.remove(i);
+
+                boolean expected = inst.stopping || "gameover".equals(reason)
+                    || "stop".equals(reason) || "shutdown".equals(reason);
+                if(expected){
+                    Log.info("[mp-sectors] instance @ exited (@)", inst.sector, reason.isEmpty() ? "stopped" : reason);
+                }else{
+                    Log.err("[mp-sectors] instance @ crashed", inst.sector);
+                    handleCrash(inst, now);
+                }
                 continue;
             }
 
@@ -245,6 +260,45 @@ public class InstanceManager{
         }
     }
 
+    private String readExitReason(Instance inst){
+        Fi file = inst.dir.child("exit.reason");
+        if(!file.exists()) return "";
+        try{
+            String reason = file.readString().trim();
+            file.delete();
+            return reason;
+        }catch(Throwable t){
+            return "";
+        }
+    }
+
+    /** Restarts a crashed instance, but no more than three times in ten minutes. */
+    private void handleCrash(Instance inst, long now){
+        long[] state = crashCounts.get(inst.sector);
+        if(state == null || now - state[0] > 10L * 60L * 1000L){
+            state = new long[]{now, 0};
+            crashCounts.put(inst.sector, state);
+        }
+        state[1]++;
+
+        if(state[1] > 3){
+            if(notify != null) notify.get("Сектор " + inst.sector + " падает снова и снова; перезапуск остановлен.");
+            return;
+        }
+
+        if(notify != null) notify.get("Сектор " + inst.sector + " упал, перезапускаю (" + state[1] + "/3)...");
+        Thread thread = new Thread(() -> {
+            Instance restarted = start(inst.sector);
+            if(notify != null){
+                notify.get(restarted == null
+                    ? "Не удалось перезапустить сектор " + inst.sector + "."
+                    : "Сектор " + inst.sector + " снова запущен.");
+            }
+        }, "mp-sectors-watchdog-" + inst.sector);
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     /** Stops on a background thread: waiting for a process must never freeze the coordinator's game loop. */
     private void stopAsync(Instance inst){
         inst.stopping = true;
@@ -262,9 +316,19 @@ public class InstanceManager{
         thread.start();
     }
 
-    public synchronized void stop(String sector){
-        Instance inst = get(sector);
-        if(inst != null) stop(inst);
+    public void stop(String sector){
+        Instance inst;
+        synchronized(this){
+            inst = get(sector);
+            if(inst == null) return;
+
+            //mark and remove before waiting: otherwise the watchdog would restart the process
+            inst.stopping = true;
+            instances.remove(inst);
+        }
+
+        //wait outside the manager lock: the coordinator's game thread must keep ticking
+        stop(inst);
     }
 
     /** Stops in the background, so the HTTP/admin thread never waits for a process. */

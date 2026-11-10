@@ -3,6 +3,7 @@ package mpsectors;
 import arc.Core;
 import arc.files.Fi;
 import arc.struct.ObjectMap;
+import arc.struct.Seq;
 import arc.util.Log;
 import arc.util.Nullable;
 import arc.util.serialization.Jval;
@@ -55,6 +56,8 @@ public class Coordinator{
         public int memoryMb = 1024;
         /** Where campaign snapshots live; empty means <campaign>/../backups. */
         public String snapshotDir = "";
+        /** Query GitHub Releases once a day and log a newer version. */
+        public boolean updateCheck = true;
         public boolean allowDuplicateClients = true;
         public String serverJar = "";
         public String javaPath = "";
@@ -135,6 +138,8 @@ public class Coordinator{
     public static class RestoreRequest{
         public String name = "";
         public String player = "";
+        public String sector = "";
+        public String comment = "";
     }
 
     /** One moderator action from the in-game admin panel. */
@@ -185,6 +190,7 @@ public class Coordinator{
     private volatile String pendingHome;
     private volatile int homePlayers;
     private volatile String[] homePlayerNames = {};
+    private long limitSince, lastLimitKick;
     private long lastAutosave;
     private long lastImportRefresh;
     private HttpServer http;
@@ -196,6 +202,8 @@ public class Coordinator{
     /** Campaign-wide pause: no landing on new sectors while true. */
     private volatile boolean paused;
     private long lastSnapshot;
+    private long lastUpdateCheck;
+    private volatile boolean updateCheckRunning;
     private static final int maxSnapshots = 50;
     private static final int maxDailySnapshots = 7;
     private static final long snapshotInterval = 10 * 60 * 1000L;
@@ -203,7 +211,11 @@ public class Coordinator{
     //cross-sector chat: a small ring buffer, polled by the clients of every sector
     private final ArrayList<ChatMessage> chat = new ArrayList<>();
     private long chatId;
+    private Fi chatFile;
+    private final ObjectMap<String, long[]> chatRate = new ObjectMap<>();
     private static final int maxChatMessages = 200;
+    private static final int chatBurst = 5;
+    private static final long chatWindow = 10_000L;
 
     //campaign log and per-sector names/notes
     private final ArrayList<HistoryEvent> history = new ArrayList<>();
@@ -219,7 +231,7 @@ public class Coordinator{
         this.config.campaign = this.campaign.absolutePath();
         this.homeFile = campaign.child("home.json");
         this.stopFile = Core.files.local("stop.flag");
-        this.instances = new InstanceManager(config);
+        this.instances = new InstanceManager(config, this::watchdogMessage);
     }
 
     public void start(){
@@ -259,6 +271,11 @@ public class Coordinator{
             Core.settings.put("playerlimit", config.maxPlayers);
             if(config.steam) SteamSupport.init();
             Log.info("[mp-sectors] gate cores: foundation=@ nucleus=@", Blocks.coreFoundation.unlocked(), Blocks.coreNucleus.unlocked());
+
+            //read the shared lists before the port opens: a banned player must not slip in
+            Moderators.init(campaign);
+            Bans.init(campaign);
+
             Vars.netServer.admins.setPlayerLimit(config.maxPlayers);
             Vars.netServer.openServer();
 
@@ -276,10 +293,11 @@ public class Coordinator{
             dailyDir.mkdirs();
             lastSnapshot = System.currentTimeMillis();
 
-            Moderators.init(campaign);
             historyFile = campaign.child("history.json");
             notesFile = campaign.child("notes.json");
+            chatFile = campaign.child("chat.json");
             loadHistory();
+            loadChat();
             checkSnapshotsAsync();
 
             startHttp();
@@ -309,6 +327,12 @@ public class Coordinator{
         instances.tick();
 
         long now = System.currentTimeMillis();
+        enforcePlayerLimit(now);
+
+        if(config.updateCheck && now - lastUpdateCheck >= 24L * 60L * 60L * 1000L){
+            checkUpdates();
+        }
+
         if(!restoring && now - lastImportRefresh >= 5000L){
             lastImportRefresh = now;
             if(home != null && home.loaded) home.refreshImportRates();
@@ -339,6 +363,7 @@ public class Coordinator{
         try{
             instances.stopAll();
             if(home != null && home.loaded) home.save();
+            saveChat();
         }catch(Throwable t){
             Log.err("[mp-sectors] coordinator shutdown failed", t);
         }
@@ -414,12 +439,20 @@ public class Coordinator{
     }
 
     private boolean appendSnapshot(StringBuilder json, Fi dir, boolean daily, boolean first){
+        Fi commentFile = dir.child("comment.txt");
+        String comment = "";
+        try{
+            if(commentFile.exists()) comment = commentFile.readString().trim();
+        }catch(Throwable ignored){
+        }
+
         if(!first) json.append(',');
         json.append("{\"name\":\"").append(esc(dir.name())).append("\",")
             .append("\"time\":").append(snapshotTime(dir)).append(',')
             .append("\"size\":").append(dirSize(dir)).append(',')
             .append("\"daily\":").append(daily).append(',')
             .append("\"beforeRestore\":").append(dir.name().startsWith("before-restore_")).append(',')
+            .append("\"comment\":\"").append(esc(comment)).append("\",")
             .append("\"valid\":").append(validSnapshotCached(dir)).append('}');
         return false;
     }
@@ -458,6 +491,97 @@ public class Coordinator{
         }
 
         return "{\"ok\":true}";
+    }
+
+    private String snapshotSectorsJson(HttpExchange ex) throws IOException{
+        RestoreRequest req = JsonIO.read(RestoreRequest.class, body(ex));
+        if(req == null || req.name == null || !Moderators.isModerator(req.player)){
+            return "{\"ok\":false,\"error\":\"Недостаточно прав.\"}";
+        }
+
+        Fi dir = findSnapshot(req.name);
+        if(dir == null) return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+
+        StringBuilder json = new StringBuilder("{\"ok\":true,\"sectors\":[");
+        boolean first = true;
+        Fi sectors = dir.child("sectors");
+        if(sectors.exists()){
+            for(Fi save : sectors.list()){
+                if(!save.extension().equals("msav")) continue;
+                if(!first) json.append(',');
+                first = false;
+                json.append('"').append(esc(save.nameWithoutExtension())).append('"');
+            }
+        }
+        return json.append("]}").toString();
+    }
+
+    private String snapshotCommentJson(HttpExchange ex) throws IOException{
+        RestoreRequest req = JsonIO.read(RestoreRequest.class, body(ex));
+        if(req == null || req.name == null || !Moderators.isModerator(req.player)){
+            return "{\"ok\":false,\"error\":\"Недостаточно прав.\"}";
+        }
+
+        Fi dir = findSnapshot(req.name);
+        if(dir == null) return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+
+        String comment = req.comment == null ? "" : req.comment.trim();
+        if(comment.length() > 200) comment = comment.substring(0, 200);
+
+        try{
+            SectorRunner.writeAtomic(dir.child("comment.txt"), comment);
+        }catch(Throwable t){
+            return "{\"ok\":false,\"error\":\"Не удалось сохранить комментарий.\"}";
+        }
+
+        addHistory("snapshot-comment", "", req.player, "Комментарий к снимку " + req.name + ": " + comment);
+        return "{\"ok\":true}";
+    }
+
+    /** Restores one sector from a snapshot; the home sector still needs the full restore. */
+    private String restoreSectorJson(HttpExchange ex) throws IOException{
+        RestoreRequest req = JsonIO.read(RestoreRequest.class, body(ex));
+        if(req == null || req.name == null || req.sector == null || !Moderators.isModerator(req.player)){
+            return "{\"ok\":false,\"error\":\"Недостаточно прав.\"}";
+        }
+        if(restoring) return "{\"ok\":false,\"error\":\"Кампания уже восстанавливается.\"}";
+        if(req.sector.equals(homeSector)){
+            return "{\"ok\":false,\"error\":\"Домашний сектор откатывается только целиком.\"}";
+        }
+        if(sectorForKey(req.sector) == null){
+            return "{\"ok\":false,\"error\":\"Нет такого сектора.\"}";
+        }
+
+        Fi dir = findSnapshot(req.name);
+        if(dir == null) return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+
+        Fi srcSave = dir.child("sectors").child(req.sector + ".msav");
+        Fi srcInfo = dir.child("info").child(req.sector + ".json");
+        if(!srcSave.exists() || !srcInfo.exists()){
+            return "{\"ok\":false,\"error\":\"В снимке нет этого сектора.\"}";
+        }
+
+        restoring = true;
+        try{
+            InstanceManager.Instance inst = instances.get(req.sector);
+            if(inst != null) instances.stop(req.sector);
+
+            takeSnapshot("before-restore_");
+
+            synchronized(campaignLock){
+                SectorRunner.copy(srcSave, campaign.child("sectors").child(req.sector + ".msav"));
+                SectorRunner.copy(srcInfo, campaign.child("info").child(req.sector + ".json"));
+            }
+
+            addHistory("restore-sector", req.sector, req.player, "Сектор восстановлен из " + req.name);
+            Log.info("[mp-sectors] sector @ restored from @", req.sector, req.name);
+            return "{\"ok\":true}";
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not restore sector @", req.sector, t);
+            return "{\"ok\":false,\"error\":\"Ошибка восстановления сектора.\"}";
+        }finally{
+            restoring = false;
+        }
     }
 
     private String restoreJson(HttpExchange ex) throws IOException{
@@ -584,6 +708,7 @@ public class Coordinator{
 
             //the in-memory log belongs to the old campaign; load the restored one
             loadHistory();
+            loadChat();
             captured.clear();
 
             String key = readHomeSector();
@@ -928,8 +1053,7 @@ public class Coordinator{
                 if(!Float.isFinite(speed) || speed < 0.25f || speed > 16f){
                     return "{\"ok\":false,\"error\":\"Скорость должна быть от 0.25 до 16.\"}";
                 }
-                broadcastCommand("speed", Float.toString(speed));
-                addHistory("admin", "", req.player, "Скорость кампании: x" + speed);
+                setSpeedAll(speed, req.player);
                 return "{\"ok\":true}";
             }
             case "stop" -> {
@@ -982,6 +1106,29 @@ public class Coordinator{
                 }
                 addHistory("admin", "", req.player, "Модератор снят: " + req.name);
                 return "{\"ok\":true}";
+            }
+            case "ban" -> {
+                if(req.name == null || req.name.isBlank()){
+                    return "{\"ok\":false,\"error\":\"Не указан игрок.\"}";
+                }
+                ban(req.name, req.player);
+                return "{\"ok\":true}";
+            }
+            case "unban" -> {
+                if(req.name == null || req.name.isBlank()){
+                    return "{\"ok\":false,\"error\":\"Не указан игрок.\"}";
+                }
+                unban(req.name, req.player);
+                return "{\"ok\":true}";
+            }
+            case "bans" -> {
+                StringBuilder json = new StringBuilder("{\"ok\":true,\"bans\":[");
+                String[] bans = Bans.list();
+                for(int i = 0; i < bans.length; i++){
+                    if(i > 0) json.append(',');
+                    json.append('"').append(esc(bans[i])).append('"');
+                }
+                return json.append("]}").toString();
             }
             case "snapshot" -> {
                 return snapshotBlocking();
@@ -1059,6 +1206,10 @@ public class Coordinator{
             ChatPost req = JsonIO.read(ChatPost.class, body(ex));
             if(req == null || req.message == null || req.message.isBlank()) return "{\"ok\":false}";
 
+            //the client input is already limited, but direct requests are not
+            if(req.message.length() > 300) req.message = req.message.substring(0, 300);
+            if(!allowChat(req.player)) return "{\"ok\":false,\"error\":\"Слишком много сообщений, подождите.\"}";
+
             synchronized(chat){
                 ChatMessage message = new ChatMessage();
                 message.id = ++chatId;
@@ -1070,6 +1221,7 @@ public class Coordinator{
 
                 while(chat.size() > maxChatMessages) chat.remove(0);
             }
+            saveChat();
             return "{\"ok\":true}";
         }
 
@@ -1111,6 +1263,179 @@ public class Coordinator{
         return json.toString();
     }
 
+    /** Sliding 10 s window: five relayed messages per player. */
+    private boolean allowChat(String player){
+        String key = player == null || player.isEmpty() ? "?" : player;
+        long now = System.currentTimeMillis();
+
+        synchronized(chatRate){
+            long[] state = chatRate.get(key);
+            if(state == null){
+                state = new long[]{now, 0};
+                chatRate.put(key, state);
+            }
+            if(now - state[0] > chatWindow){
+                state[0] = now;
+                state[1] = 0;
+            }
+            if(state[1] >= chatBurst) return false;
+            state[1]++;
+        }
+        return true;
+    }
+
+    /** The last 200 chat lines survive a coordinator restart and snapshot restores. */
+    private void loadChat(){
+        synchronized(chat){
+            chat.clear();
+            chatId = 0;
+            if(chatFile == null || !chatFile.exists()) return;
+
+            try{
+                ChatMessage[] stored = JsonIO.read(ChatMessage[].class, chatFile.readString());
+                if(stored != null){
+                    for(ChatMessage message : stored){
+                        if(message == null || message.message == null || message.message.isEmpty()) continue;
+                        chat.add(message);
+                        chatId = Math.max(chatId, message.id);
+                    }
+                }
+                while(chat.size() > maxChatMessages) chat.remove(0);
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not read chat.json", t);
+            }
+        }
+    }
+
+    private void saveChat(){
+        if(chatFile == null) return;
+
+        synchronized(chat){
+            try{
+                StringBuilder json = new StringBuilder("[");
+                for(int i = 0; i < chat.size(); i++){
+                    ChatMessage m = chat.get(i);
+                    if(i > 0) json.append(',');
+                    json.append("{\"id\":").append(m.id)
+                        .append(",\"time\":").append(m.time)
+                        .append(",\"player\":\"").append(esc(m.player)).append('"')
+                        .append(",\"sector\":\"").append(esc(m.sector)).append('"')
+                        .append(",\"message\":\"").append(esc(m.message)).append("\"}");
+                }
+                json.append(']');
+
+                campaign.mkdirs();
+                SectorRunner.writeAtomic(chatFile, json.toString());
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not write chat.json", t);
+            }
+        }
+    }
+
+    /** A campaign-wide line (watchdog, player limit), shown as "◆ message" in every sector. */
+    public void addSystemChat(String message){
+        if(message == null || message.isEmpty()) return;
+
+        synchronized(chat){
+            ChatMessage m = new ChatMessage();
+            m.id = ++chatId;
+            m.time = System.currentTimeMillis();
+            m.player = "Кампания";
+            m.sector = "";
+            m.message = message;
+            chat.add(m);
+            while(chat.size() > maxChatMessages) chat.remove(0);
+        }
+        saveChat();
+    }
+
+    private void watchdogMessage(String text){
+        Log.info("[mp-sectors] @", text);
+        addSystemChat(text);
+        addHistory("watchdog", "", "", text);
+    }
+
+    /**
+     * Direct connections to an instance port bypass the maxPlayers check in /land. If the
+     * campaign stays over the limit for five seconds, kick the extra players.
+     */
+    private void enforcePlayerLimit(long now){
+        int total = homePlayers + instances.totalPlayers();
+        if(total <= config.maxPlayers){
+            limitSince = 0;
+            return;
+        }
+
+        if(limitSince == 0){
+            limitSince = now;
+            return;
+        }
+        if(now - limitSince < 5000L || now - lastLimitKick < 5000L) return;
+        lastLimitKick = now;
+
+        int excess = total - config.maxPlayers;
+        for(InstanceManager.Instance inst : instances.all()){
+            if(excess <= 0) break;
+            String[] names = inst.playerNames;
+            if(names == null) continue;
+
+            for(String name : names){
+                if(excess <= 0) break;
+                if(name == null || name.isEmpty()) continue;
+                command(inst.sector, "limit", name);
+                addSystemChat("Лимит " + config.maxPlayers + " игроков: " + name + " отключён.");
+                excess--;
+            }
+        }
+
+        if(excess > 0){
+            var players = Groups.player.copy();
+            for(int i = players.size - 1; i >= 0 && excess > 0; i--){
+                //keep the first home player (usually the host) when there is someone else
+                if(players.size > 1 && i == 0) continue;
+                Player player = players.get(i);
+                player.kick(KickReason.playerLimit);
+                addSystemChat("Лимит " + config.maxPlayers + " игроков: " + player.plainName() + " отключён.");
+                excess--;
+            }
+        }
+    }
+
+    /** Snapshot of who is where, used by /who and the map panel. */
+    public String[] whoLines(){
+        Seq<String> lines = new Seq<>();
+        lines.add("[accent]Дом (" + homeSector + "): [white]" + joinNames(homePlayerNames));
+        for(InstanceManager.Instance inst : instances.all()){
+            Sector sector = sectorForKey(inst.sector);
+            String name = sector == null ? inst.sector : sector.name();
+            lines.add("[accent]" + name + " (" + inst.sector + "): [white]" + joinNames(inst.playerNames));
+        }
+        return lines.toArray(String.class);
+    }
+
+    private static String joinNames(String[] names){
+        if(names == null) return "пусто";
+
+        StringBuilder out = new StringBuilder();
+        for(String name : names){
+            if(name == null || name.isEmpty()) continue;
+            if(out.length() > 0) out.append(", ");
+            out.append(name);
+        }
+        return out.length() == 0 ? "пусто" : out.toString();
+    }
+
+    private Sector sectorForKey(String key){
+        if(key == null) return null;
+        int split = key.lastIndexOf('-');
+        if(split <= 0) return null;
+        try{
+            return sector(key.substring(0, split), Integer.parseInt(key.substring(split + 1)));
+        }catch(NumberFormatException e){
+            return null;
+        }
+    }
+
     public Fi unlocksFile(){
         return home == null ? null : home.unlocksFile;
     }
@@ -1128,6 +1453,16 @@ public class Coordinator{
         return paused;
     }
 
+    public boolean isRestoring(){
+        return restoring;
+    }
+
+    /** Sets the speed of the home and every running sector. */
+    public void setSpeedAll(float speed, String player){
+        broadcastCommand("speed", Float.toString(speed));
+        addHistory("admin", "", player == null ? "" : player, "Скорость кампании: x" + speed);
+    }
+
     /** Pauses/resumes the home and every running sector and blocks new landings while paused. */
     public synchronized void setPaused(boolean paused, String player){
         this.paused = paused;
@@ -1142,6 +1477,37 @@ public class Coordinator{
         broadcastCommand("pause", paused ? "true" : "false");
         addHistory("admin", "", player == null ? "" : player, paused ? "Кампания на паузе" : "Кампания продолжена");
         Log.info("[mp-sectors] campaign paused=@", paused);
+    }
+
+    /** Adds a campaign-wide ban and kicks the player from the home and every instance. */
+    public void ban(String name, String player){
+        if(name == null || name.isBlank()) return;
+
+        Bans.add(name);
+        addHistory("admin", "", player == null ? "" : player, "Бан: " + name);
+        Core.app.post(() -> MpSectorsMod.adminBan(name));
+        for(InstanceManager.Instance inst : instances.all()){
+            command(inst.sector, "ban", name);
+        }
+    }
+
+    public void unban(String name, String player){
+        if(name == null || name.isBlank()) return;
+
+        Bans.remove(name);
+        addHistory("admin", "", player == null ? "" : player, "Разбан: " + name);
+    }
+
+    public String[] banLines(){
+        String[] bans = Bans.list();
+        if(bans.length == 0) return new String[]{"[lightgray]Банов нет."};
+
+        String[] lines = new String[bans.length + 1];
+        lines[0] = "[accent]Баны (" + bans.length + "):";
+        for(int i = 0; i < bans.length; i++){
+            lines[i + 1] = "[white]" + bans[i];
+        }
+        return lines;
     }
 
     /** The home sector's core was destroyed: keep the save, mark it unowned, stop autosaving it. */
@@ -1185,6 +1551,9 @@ public class Coordinator{
         http.createContext("/status", ex -> respond(ex, handle(ex, this::statusJson)));
         http.createContext("/snapshots", ex -> respond(ex, handle(ex, this::snapshotsJson)));
         http.createContext("/snapshot", ex -> respond(ex, handle(ex, this::snapshotJson)));
+        http.createContext("/snapshot-sectors", ex -> respond(ex, handle(ex, this::snapshotSectorsJson)));
+        http.createContext("/snapshot-comment", ex -> respond(ex, handle(ex, this::snapshotCommentJson)));
+        http.createContext("/restore-sector", ex -> respond(ex, handle(ex, this::restoreSectorJson)));
         http.createContext("/restore", ex -> respond(ex, handle(ex, this::restoreJson)));
         http.createContext("/chat", ex -> respond(ex, handle(ex, this::chatJson)));
         http.createContext("/history", ex -> respond(ex, handle(ex, this::historyJson)));
@@ -1606,6 +1975,8 @@ public class Coordinator{
         json.append("\"maxSectors\":").append(config.maxSectors).append(',');
         json.append("\"maxPlayers\":").append(config.maxPlayers).append(',');
         json.append("\"paused\":").append(paused).append(',');
+        json.append("\"serverVersion\":\"").append(esc(modVersion("mp-sectors"))).append("\",");
+        json.append("\"campaignVersion\":\"").append(esc(modVersion("mp-campaign"))).append("\",");
         json.append("\"moderators\":[");
         String[] moderators = Moderators.list();
         for(int i = 0; i < moderators.length; i++){
@@ -1618,6 +1989,13 @@ public class Coordinator{
         for(int i = 0; i < homeNames.length; i++){
             if(i > 0) json.append(',');
             json.append('"').append(esc(homeNames[i])).append('"');
+        }
+        json.append("],");
+        json.append("\"who\":[");
+        String[] who = whoLines();
+        for(int i = 0; i < who.length; i++){
+            if(i > 0) json.append(',');
+            json.append('"').append(esc(who[i])).append('"');
         }
         json.append("],");
         json.append("\"instances\":[");
@@ -1832,6 +2210,58 @@ public class Coordinator{
         home = next;
         homeSector = key;
         writeHome(key);
+    }
+
+    private static String modVersion(String name){
+        try{
+            var mod = Vars.mods.getMod(name);
+            return mod == null || mod.meta == null || mod.meta.version == null ? "" : mod.meta.version;
+        }catch(Throwable t){
+            return "";
+        }
+    }
+
+    /** Once a day: ask GitHub for the latest release tag and log it. Never downloads anything. */
+    private synchronized void checkUpdates(){
+        if(updateCheckRunning) return;
+        updateCheckRunning = true;
+        lastUpdateCheck = System.currentTimeMillis();
+
+        Thread thread = new Thread(() -> {
+            java.net.HttpURLConnection connection = null;
+            try{
+                connection = (java.net.HttpURLConnection)new java.net.URL(
+                    "https://api.github.com/repos/gghanera/mp-sectors/releases/latest").openConnection();
+                connection.setRequestProperty("User-Agent", "mp-sectors");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(8000);
+
+                if(connection.getResponseCode() != 200) return;
+
+                String body = new String(connection.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                java.util.regex.Matcher matcher = java.util.regex.Pattern
+                    .compile("\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"").matcher(body);
+                if(!matcher.find()) return;
+
+                String latest = matcher.group(1);
+                //the release tag matches the client mod version (2.1.4), not the server mod version
+                String current = modVersion("mp-campaign");
+                if(current.isEmpty()){
+                    Log.info("[mp-sectors] latest release: v@ (current version unknown)", latest);
+                }else if(!current.equals(latest)){
+                    Log.info("[mp-sectors] update available: v@ (current @)", latest, current);
+                }else{
+                    Log.info("[mp-sectors] up to date (@)", current);
+                }
+            }catch(Throwable t){
+                Log.info("[mp-sectors] update check failed: @", t.getMessage());
+            }finally{
+                if(connection != null) connection.disconnect();
+                updateCheckRunning = false;
+            }
+        }, "mp-sectors-update-check");
+        thread.setDaemon(true);
+        thread.start();
     }
 
     static String esc(String value){

@@ -224,6 +224,29 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   sectors until `/resumeall`; returning to the home lobby is still allowed.
 - **Two windows on one PC** for testing: duplicate clients are allowed by default.
 
+### Co-op tools (2.2.0)
+
+- **`/who` and «Кто где»**: `/who` prints who is in which sector; the map's «Кто где» button
+  opens the same list. Names come from the coordinator's live player count.
+- **Chat survives restarts**: the last 200 lines are stored in `campaign/chat.json` and
+  reloaded by the coordinator (and after a snapshot restore). `@nick` mentions are highlighted
+  and play a sound; each player is limited to 5 cross-sector lines per 10 seconds.
+- **`/speedall <x>`**: change the speed of the home and every running sector at once.
+- **`/snapshot` in chat**: a moderator can create a campaign snapshot without Ctrl+S.
+- **Snapshot comments** (`Комментарий` in the snapshot window) and **per-sector restore**
+  (`Сектор...`): restore one non-home sector from a snapshot; the home is still restored with
+  the full campaign.
+- **Campaign-wide bans**: `/ban <name>`, `/unban <name>`, `/bans`; the list lives in
+  `campaign/bans.json` and applies to the home and every sector.
+- **Watchdog**: if an instance crashes, the coordinator writes it to chat/history and restarts
+  it, up to 3 times in 10 minutes.
+- **Global player limit**: direct connections to an instance port are now counted; if the
+  campaign stays over `maxPlayers` for 5 seconds, extra players are kicked.
+- **Version check**: the coordinator reports `serverVersion` and `campaignVersion`; the client
+  shows «Обнови mp-campaign» if the versions differ. The coordinator also checks GitHub
+  Releases once a day and logs a newer version (no auto-download; disable with
+  `"updateCheck": false`).
+
 ---
 
 ## Configuration
@@ -242,6 +265,7 @@ The HTTP API still has no token, so the panel is meant for a trusted network
 | `idleStopSeconds` | `60` | Stop an empty instance after this |
 | `autosaveSeconds` | `60` | Home autosave interval |
 | `snapshotDir` | `F:\MP-Sectors\backups` | Snapshot folder (empty = `backups` next to campaign) |
+| `updateCheck` | `true` | Check GitHub Releases once a day and log a newer version |
 | `memoryMb` | `1024` | JVM heap per instance |
 | `allowDuplicateClients` | `true` | Allow two windows from one PC |
 | `serverJar`, `javaPath` | — | Server jar and JDK paths |
@@ -255,6 +279,9 @@ campaign/
   home.json                    current home sector
   unlocks.json                 shared research
   moderators.json              moderator names
+  bans.json                    campaign-wide bans
+  chat.json                    last 200 chat lines
+  paused.flag                  campaign-wide pause marker
   notes.json                   custom sector names/notes
   history.json                 campaign log
   requests/                    transient launch/accelerator requests
@@ -284,6 +311,10 @@ Back up `campaign/` — it is the whole campaign.
 | `/pauseall` | Pause the whole campaign and block landings (moderators) |
 | `/resumeall` | Resume the whole campaign (moderators) |
 | `/speed <x>` | Game speed, e.g. `4` or `0.5` (moderators) |
+| `/speedall <x>` | Speed of the whole campaign (moderators) |
+| `/snapshot` | Create a campaign snapshot (moderators) |
+| `/who` | Who is in which sector |
+| `/ban <name>`, `/unban <name>`, `/bans` | Campaign-wide bans (moderators) |
 | `/abandon` | Abandon sector (moderators) |
 | `/anyresearch ...` | Client half of Any Research |
 
@@ -295,7 +326,9 @@ Back up `campaign/` — it is the whole campaign.
 | `mpsnapshot` | Snapshot the campaign now |
 | `mpmod add\|remove\|list` | Manage moderators |
 | `anyresearch <name>` | Research a node (admin) |
-| `pause`, `pauseall`, `resumeall`, `speed <x>`, `abandon` | Campaign controls |
+| `pause`, `pauseall`, `resumeall`, `speed <x>`, `speedall <x>`, `abandon` | Campaign controls |
+| `who` | Who is in which sector |
+| `mpsnapshot` (snapshots), `ban`/`unban` (vanilla console) | See the chat commands for shared bans |
 
 ---
 
@@ -322,7 +355,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.1.4     # dist\MP-Sectors-2.1.4.zip
+.\package.ps1 -Version 2.2.0     # dist\MP-Sectors-2.2.0.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of
