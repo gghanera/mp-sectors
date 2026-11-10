@@ -127,7 +127,11 @@ public final class Moderators{
         }
         json.append(']');
 
-        SectorRunner.writeAtomic(file, json.toString());
-        lastModified = file.lastModified();
+        try{
+            SectorRunner.writeAtomic(file, json.toString());
+            lastModified = file.lastModified();
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not write moderators.json", t);
+        }
     }
 }

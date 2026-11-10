@@ -194,7 +194,7 @@ public class MpSectorsMod extends Mod{
 
         handler.register("speed", "<x>", "Set campaign game speed, e.g. 4 or 0.5.", args -> {
             try{
-                setGameSpeed(Float.parseFloat(args[0]));
+                setGameSpeed(Float.parseFloat(args[0]), true);
             }catch(NumberFormatException e){
                 Log.err("[mp-sectors] speed must be a number, e.g. 4 or 0.5");
             }
@@ -257,7 +257,7 @@ public class MpSectorsMod extends Mod{
                 return;
             }
             try{
-                setGameSpeed(Float.parseFloat(args[0]));
+                setGameSpeed(Float.parseFloat(args[0]), true);
             }catch(NumberFormatException e){
                 if(player != null) player.sendMessage("[scarlet]Скорость должна быть числом, например 4 или 0.5.");
             }
@@ -293,6 +293,7 @@ public class MpSectorsMod extends Mod{
 
     /** Plays the vanilla launch animation for every client in this sector. */
     private void handleAcceleratorPacket(Player player, String data){
+        if(data == null) return;
         String[] parts = data.split(",");
         if(parts.length != 2) return;
 
@@ -309,7 +310,7 @@ public class MpSectorsMod extends Mod{
 
     /** Time Control bridge: the client sends the speed it picked, the server simulates at it. */
     private void handleSpeedPacket(Player player, String data){
-        if(player == null) return;
+        if(player == null || data == null) return;
 
         if(!Moderators.isModerator(player.plainName())){
             player.sendMessage("[scarlet]Только модераторы могут менять скорость игры.");
@@ -324,6 +325,14 @@ public class MpSectorsMod extends Mod{
     }
 
     private static void setGameSpeed(float speed){
+        setGameSpeed(speed, false);
+    }
+
+    /**
+     * @param force true for an explicit command/admin action: even a moderator running Time
+     *              Control must accept the server speed instead of pushing their slider back.
+     */
+    private static void setGameSpeed(float speed, boolean force){
         //NaN/Infinity would poison Time.delta and freeze the world
         if(!Float.isFinite(speed)) return;
 
@@ -337,7 +346,9 @@ public class MpSectorsMod extends Mod{
         Log.info("[mp-sectors] game speed x@", gameSpeed);
         if(changed){
             Call.sendMessage("[accent]Скорость игры: " + speedText(gameSpeed));
-            Call.clientPacketReliable(speedPacket, Float.toString(gameSpeed));
+        }
+        if(changed || force){
+            Call.clientPacketReliable(speedPacket, (force ? "force:" : "") + gameSpeed);
         }
     }
 
@@ -347,7 +358,7 @@ public class MpSectorsMod extends Mod{
             case "pause" -> adminPause(Boolean.parseBoolean(value));
             case "speed" -> {
                 try{
-                    setGameSpeed(Float.parseFloat(value));
+                    setGameSpeed(Float.parseFloat(value), true);
                 }catch(NumberFormatException ignored){
                 }
             }
@@ -462,7 +473,7 @@ public class MpSectorsMod extends Mod{
 
         postAdmin(player, "speed", null, Float.toString(speed), 15000, ok -> {
             if(ok){
-                setGameSpeed(speed);
+                setGameSpeed(speed, true);
                 reply(player, "[accent]Скорость кампании: " + speedText(speed) + ".");
             }else{
                 reply(player, "[scarlet]Не удалось изменить скорость кампании.");
@@ -501,6 +512,10 @@ public class MpSectorsMod extends Mod{
             return;
         }
         String target = name.trim();
+        if(banned && Moderators.isModerator(target)){
+            reply(player, "[scarlet]Нельзя забанить модератора. Сначала снимите его через mpmod remove.");
+            return;
+        }
 
         if(coordinator != null){
             if(banned) coordinator.ban(target, player == null ? "console" : player.plainName());
@@ -660,10 +675,20 @@ public class MpSectorsMod extends Mod{
             try{
                 Coordinator.Config config = JsonIO.read(Coordinator.Config.class, coordFile.readString());
                 if(config != null){
-                    installGameOverListener();
                     coordinator = new Coordinator(config);
                     chatPort = config.httpPort;
                     coordinator.start();
+                    if(!coordinator.isStarted()){
+                        Log.err("[mp-sectors] coordinator failed to start; continuing as a normal server");
+                        try{
+                            coordinator.shutdown();
+                        }catch(Throwable ignored){
+                        }
+                        coordinator = null;
+                        chatPort = 0;
+                        return;
+                    }
+                    installGameOverListener();
                     Sector home = Vars.state.getSector();
                     chatSector = home == null ? "" : home.planet.name + "-" + home.id;
                     return;
@@ -749,9 +774,9 @@ public class MpSectorsMod extends Mod{
             runner.loadout = instanceConfig.loadout;
             runner.resources = instanceConfig.resources;
             stopFile = Core.files.local("stop.flag");
-            installGameOverListener();
 
             if(!runner.load()){ Core.app.exit(); return; }
+            installGameOverListener();
 
             if(instanceConfig.port > 0) Core.settings.put("port", instanceConfig.port);
             Core.settings.put("playerlimit", instanceConfig.playerLimit);
@@ -991,11 +1016,11 @@ public class MpSectorsMod extends Mod{
             for(Player player : Groups.player){
                 if(!first) json.append(',');
                 first = false;
-                json.append('"').append(player.plainName().replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+                json.append('"').append(Coordinator.esc(player.plainName())).append('"');
             }
 
             json.append("]}");
-            Core.files.local("status.json").writeString(json.toString());
+            SectorRunner.writeAtomic(Core.files.local("status.json"), json.toString());
         }catch(Throwable t){
             Log.err("[mp-sectors] could not write status.json", t);
         }

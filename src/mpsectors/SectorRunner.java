@@ -142,6 +142,10 @@ public class SectorRunner{
 
                 SaveIO.save(localSave);
 
+                //publish the generated save at once: the first autosave may be a minute away,
+                //and a crash before it would leave info.hasCore set with no campaign save
+                copy(localSave, campaignSave);
+
                 //SaveIO updated sector.info from the freshly placed core; publish it so the map
                 //immediately knows this sector has a base again
                 campaignInfo.parent().mkdirs();

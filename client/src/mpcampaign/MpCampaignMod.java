@@ -96,6 +96,7 @@ public class MpCampaignMod extends Mod{
     private static float serverSpeed = 1f, pendingSpeed = 1f;
     private static long pendingSince;
     private static boolean serverSpeedPending;
+    private static boolean forceServerSpeed;
 
     //cross-sector chat: the coordinator keeps a buffer, every client polls what it has not seen
     private static long lastChatId, lastChatPoll;
@@ -121,6 +122,7 @@ public class MpCampaignMod extends Mod{
             serverSpeed = 1f;
             pendingSpeed = 1f;
             serverSpeedPending = false;
+            forceServerSpeed = false;
         });
         Events.on(TapEvent.class, MpCampaignMod::onAcceleratorTap);
         Events.run(Trigger.update, MpCampaignMod::update);
@@ -224,7 +226,12 @@ public class MpCampaignMod extends Mod{
     private static void updateTimeControl(){
         if(Vars.headless || Vars.net == null || !Vars.net.client() || !Vars.state.isCampaign()) return;
 
-        if(serverSpeedPending && Vars.player != null){
+        if(forceServerSpeed){
+            //an explicit /speed or admin-panel change wins over the host's Time Control slider
+            forceServerSpeed = false;
+            serverSpeedPending = false;
+            setClientSpeed(serverSpeed);
+        }else if(serverSpeedPending && Vars.player != null){
             serverSpeedPending = false;
             //the owner keeps the speed picked in Time Control; everyone else follows the server
             if(!isModerator() || Math.abs(currentSpeed() - 1f) <= 0.02f){
@@ -281,12 +288,17 @@ public class MpCampaignMod extends Mod{
     }
 
     private static void onSpeedPacket(String data){
+        if(data == null) return;
         try{
+            boolean force = data.startsWith("force:");
+            if(force) data = data.substring("force:".length());
+
             float speed = Float.parseFloat(data.trim());
             if(!Float.isFinite(speed)) return;
 
             serverSpeed = Mathf.clamp(speed, minSpeed, maxSpeed);
             serverSpeedPending = true;
+            if(force) forceServerSpeed = true;
         }catch(NumberFormatException ignored){
         }
     }
@@ -670,20 +682,25 @@ public class MpCampaignMod extends Mod{
         body.add("player", localName());
 
         if(withLoadout && from != null){
+            body.add("fromPlanet", from.planet.name);
+            body.add("fromId", Jval.valueOf(from.id));
+
             try{
                 Schematic schem = Vars.universe.getLastLoadout();
-                ItemSeq resources = Vars.universe.getLaunchResources();
+                if(schem == null) throw new IllegalStateException("no last loadout");
 
+                ItemSeq resources = Vars.universe.getLaunchResources();
                 ItemSeq cost = schem.requirements();
                 resources.each(cost::add);
 
-                body.add("fromPlanet", from.planet.name);
-                body.add("fromId", Jval.valueOf(from.id));
                 body.add("loadout", Vars.schematics.writeBase64(schem));
                 body.add("resources", itemsString(resources));
                 body.add("cost", itemsString(cost));
             }catch(Throwable t){
+                //do not fall through: a landing without a cost/loadout would be free
                 Log.err("[mp-campaign] could not serialize launch loadout", t);
+                Vars.ui.showInfoFade("[scarlet]Не удалось подготовить схему ядра. Высадка отменена.");
+                return;
             }
         }
 
@@ -868,7 +885,10 @@ public class MpCampaignMod extends Mod{
             body.add("resources", itemsString(resources));
             body.add("loadout", Vars.schematics.writeBase64(schem));
         }catch(Throwable t){
+            //abort: the coordinator would consume the accelerator and start an empty sector
             Log.err("[mp-campaign] could not serialize accelerator launch", t);
+            Vars.ui.showInfoFade("[scarlet]Не удалось подготовить запуск ускорителя. Отменено.");
+            return;
         }
 
         Vars.ui.loadfrag.show("@connecting");

@@ -201,6 +201,7 @@ public class Coordinator{
     private volatile boolean restoring;
     /** Campaign-wide pause: no landing on new sectors while true. */
     private volatile boolean paused;
+    private volatile boolean started;
     private long lastSnapshot;
     private long lastUpdateCheck;
     private volatile boolean updateCheckRunning;
@@ -303,6 +304,7 @@ public class Coordinator{
             checkSnapshotsAsync();
 
             startHttp();
+            started = true;
             Log.info("[mp-sectors] coordinator ready: home=@ game=@ http=@ duplicates=@", homeSector, config.gamePort, config.httpPort, config.allowDuplicateClients ? "allowed" : "blocked");
         }catch(Throwable t){
             Log.err("[mp-sectors] coordinator failed to start", t);
@@ -374,14 +376,15 @@ public class Coordinator{
     // ---------------- campaign snapshots ----------------
 
     /** Copies the whole campaign into backups/<timestamp>, keeping the newest 50 plus 7 daily. */
-    private void takeSnapshot(){
-        takeSnapshot("");
+    private boolean takeSnapshot(){
+        return takeSnapshot("");
     }
 
     /** @param prefix empty for a regular snapshot, "before-restore_" for the safety copy. */
-    private void takeSnapshot(String prefix){
-        if(snapshotsDir == null) return;
+    private boolean takeSnapshot(String prefix){
+        if(snapshotsDir == null) return false;
 
+        boolean ok = false;
         synchronized(campaignLock){
             try{
                 snapshotsDir.mkdirs();
@@ -418,12 +421,14 @@ public class Coordinator{
 
                 addHistory("snapshot", "", "", prefix.isEmpty() ? "Снимок " + dir.name() : "Страховочный снимок " + dir.name());
                 Log.info("[mp-sectors] campaign snapshot @ created", dir.name());
+                ok = true;
             }catch(Throwable t){
                 Log.err("[mp-sectors] could not create a campaign snapshot", t);
             }finally{
                 lastSnapshot = System.currentTimeMillis();
             }
         }
+        return ok;
     }
 
     private String snapshotsJson(HttpExchange ex){
@@ -556,6 +561,7 @@ public class Coordinator{
 
         Fi dir = findSnapshot(req.name);
         if(dir == null) return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+        if(!validSnapshot(dir)) return "{\"ok\":false,\"error\":\"Снимок повреждён.\"}";
 
         Fi srcSave = dir.child("sectors").child(req.sector + ".msav");
         Fi srcInfo = dir.child("info").child(req.sector + ".json");
@@ -713,6 +719,10 @@ public class Coordinator{
             loadChat();
             captured.clear();
 
+            //the restored campaign may have different moderators/bans than the live lists
+            Moderators.init(campaign);
+            Bans.init(campaign);
+
             String key = readHomeSector();
             if(key == null) key = homeSector;
 
@@ -832,7 +842,8 @@ public class Coordinator{
     }
 
     private boolean validSnapshotCached(Fi dir){
-        return validSnapshots.getOrDefault(dir.name(), true);
+        //a snapshot created after startup is not in the map yet; validate it once on first use
+        return validSnapshots.computeIfAbsent(dir.name(), name -> validSnapshot(dir));
     }
 
     /** A snapshot is usable when it has sectors/ with at least one readable MSAV file. */
@@ -933,13 +944,13 @@ public class Coordinator{
     }
 
     private synchronized void loadHistory(){
+        history.clear();
         if(historyFile == null || !historyFile.exists()) return;
 
         try{
             HistoryList list = JsonIO.read(HistoryList.class, historyFile.readString());
             if(list == null || list.events == null) return;
 
-            history.clear();
             for(HistoryEvent event : list.events){
                 if(event != null) history.add(event);
             }
@@ -1113,6 +1124,9 @@ public class Coordinator{
                 if(req.name == null || req.name.isBlank()){
                     return "{\"ok\":false,\"error\":\"Не указан игрок.\"}";
                 }
+                if(Moderators.isModerator(req.name)){
+                    return "{\"ok\":false,\"error\":\"Нельзя забанить модератора. Сначала снимите его.\"}";
+                }
                 ban(req.name, req.player);
                 return "{\"ok\":true}";
             }
@@ -1148,6 +1162,7 @@ public class Coordinator{
     private void broadcastCommand(String action, String value){
         Core.app.post(() -> MpSectorsMod.adminCommand(action, value));
         for(InstanceManager.Instance inst : instances.all()){
+            if(inst.stopping) continue;
             command(inst.sector, action, value);
         }
     }
@@ -1173,7 +1188,7 @@ public class Coordinator{
         if(!file.exists()) return "{\"ok\":false,\"error\":\"Лог не найден.\"}";
 
         try{
-            String[] lines = file.readString().split("\n", -1);
+            String[] lines = readTail(file, 64 * 1024).split("\n", -1);
             int start = Math.max(0, lines.length - 150);
             StringBuilder out = new StringBuilder();
             for(int i = start; i < lines.length; i++){
@@ -1184,6 +1199,27 @@ public class Coordinator{
         }catch(Throwable t){
             return "{\"ok\":false,\"error\":\"Не удалось прочитать лог.\"}";
         }
+    }
+
+    /** Reads the end of a log without loading a multi-gigabyte file into memory. */
+    private static String readTail(Fi file, int maxBytes) throws IOException{
+        long length = file.length();
+        if(length <= 0) return "";
+
+        long start = Math.max(0, length - maxBytes);
+        byte[] bytes = new byte[(int)(length - start)];
+        try(java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file.file(), "r")){
+            raf.seek(start);
+            raf.readFully(bytes);
+        }
+
+        String text = new String(bytes, StandardCharsets.UTF_8);
+        if(start > 0){
+            //the cut may be in the middle of a line; drop the partial first line
+            int newline = text.indexOf('\n');
+            if(newline >= 0) text = text.substring(newline + 1);
+        }
+        return text;
     }
 
     private Jval readNotes(){
@@ -1242,9 +1278,10 @@ public class Coordinator{
 
         StringBuilder json = new StringBuilder();
         synchronized(chat){
-            //a restarted coordinator starts ids from 1; a client with an old id must not stall,
-            //and the first message after the restart must not be skipped either
-            if(since > chatId) since = chat.isEmpty() ? chatId : chat.get(0).id - 1;
+            //a restarted coordinator has a lower id again. Do not replay the whole restored
+            //buffer (clients would see 200 old lines); skip to the current id, so new lines
+            //start at chatId + 1 and are not lost. A fresh client (since = 0) still gets the buffer.
+            if(since > chatId) since = chatId;
             if(!chat.isEmpty() && since < chat.get(0).id - 1) since = chat.get(0).id - 1;
 
             json.append("{\"next\":").append(chatId).append(",\"messages\":[");
@@ -1385,6 +1422,7 @@ public class Coordinator{
         int excess = total - config.maxPlayers;
         for(InstanceManager.Instance inst : instances.all()){
             if(excess <= 0) break;
+            if(inst.stopping) continue;
             String[] names = inst.playerNames;
             if(names == null) continue;
 
@@ -1415,6 +1453,7 @@ public class Coordinator{
         Seq<String> lines = new Seq<>();
         lines.add("[accent]Дом (" + homeSector + "): [white]" + joinNames(homePlayerNames));
         for(InstanceManager.Instance inst : instances.all()){
+            if(inst.stopping) continue;
             Sector sector = sectorForKey(inst.sector);
             String name = sector == null ? inst.sector : sector.name();
             lines.add("[accent]" + name + " (" + inst.sector + "): [white]" + joinNames(inst.playerNames));
@@ -1453,13 +1492,17 @@ public class Coordinator{
         if(home != null && home.loaded) home.save();
     }
 
-    /** Manual snapshot, used by the mpsnapshot console command. */
-    public void snapshotNow(){
-        takeSnapshot();
+    /** Manual snapshot, used by /snapshot and the mpsnapshot console command. */
+    public boolean snapshotNow(){
+        return takeSnapshot();
     }
 
     public boolean isPaused(){
         return paused;
+    }
+
+    public boolean isStarted(){
+        return started;
     }
 
     public boolean isRestoring(){
@@ -1477,10 +1520,14 @@ public class Coordinator{
         this.paused = paused;
 
         Fi flag = campaign.child("paused.flag");
-        if(paused){
-            SectorRunner.writeAtomic(flag, "1");
-        }else if(flag.exists()){
-            flag.delete();
+        try{
+            if(paused){
+                SectorRunner.writeAtomic(flag, "1");
+            }else if(flag.exists()){
+                flag.delete();
+            }
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not write paused.flag", t);
         }
 
         broadcastCommand("pause", paused ? "true" : "false");
@@ -1496,6 +1543,7 @@ public class Coordinator{
         addHistory("admin", "", player == null ? "" : player, "Бан: " + name);
         Core.app.post(() -> MpSectorsMod.adminBan(name));
         for(InstanceManager.Instance inst : instances.all()){
+            if(inst.stopping) continue;
             command(inst.sector, "ban", name);
         }
     }
@@ -1667,8 +1715,11 @@ public class Coordinator{
                 String key = planet.name + "-" + sector.id;
                 SectorInfo info = snap.info.get(key);
                 boolean hasBase = snap.hasBase.get(key, false);
-                boolean running = (key.equals(homeSector) && home != null && home.loaded) || instances.get(key) != null;
-                int players = key.equals(homeSector) ? homePlayers : (instances.get(key) == null ? 0 : instances.get(key).players);
+                InstanceManager.Instance inst = instances.get(key);
+                boolean running = (key.equals(homeSector) && home != null && home.loaded)
+                    || (inst != null && !inst.stopping);
+                int players = key.equals(homeSector) ? homePlayers
+                    : (inst == null || inst.stopping ? 0 : inst.players);
                 boolean captured = info != null && info.hasCore && !info.waves && !info.attack;
 
                 //the map asks for this list often; record a capture once, when it flips
@@ -1759,6 +1810,9 @@ public class Coordinator{
         }
 
         InstanceManager.Instance inst = instances.get(key);
+        //a sector being stopped is still in the list; do not hand its dying port to the client
+        if(inst != null && inst.stopping) inst = null;
+
         if(inst == null){
             if(1 + instances.runningCount() + 1 > config.maxSectors){
                 out.error = "Места заняты: уже загружено " + config.maxSectors + " секторов.";
@@ -1786,6 +1840,12 @@ public class Coordinator{
                 out.error = "Не удалось запустить сектор.";
                 return landJson(out);
             }
+        }
+
+        //an admin may have stopped this sector while another player was landing
+        if(inst.stopping){
+            out.error = "Сектор останавливается, попробуйте ещё раз.";
+            return landJson(out);
         }
 
         //consume the launch source even when the target sector was already running
@@ -1868,15 +1928,19 @@ public class Coordinator{
      * would be deleted by whichever sector read it first.
      */
     private void writeRequest(String type, String json){
-        Fi dir = campaign.child("requests");
-        dir.mkdirs();
+        try{
+            Fi dir = campaign.child("requests");
+            dir.mkdirs();
 
-        long now = System.currentTimeMillis();
-        for(Fi old : dir.list()){
-            if(now - old.file().lastModified() > 120_000L) old.delete();
+            long now = System.currentTimeMillis();
+            for(Fi old : dir.list()){
+                if(now - old.file().lastModified() > 120_000L) old.delete();
+            }
+
+            SectorRunner.writeAtomic(dir.child(type + "-" + System.nanoTime() + ".json"), json);
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not write @ request", type, t);
         }
-
-        SectorRunner.writeAtomic(dir.child(type + "-" + System.nanoTime() + ".json"), json);
     }
 
     /**
@@ -2010,6 +2074,7 @@ public class Coordinator{
         json.append("\"instances\":[");
         boolean first = true;
         for(InstanceManager.Instance inst : instances.all()){
+            if(inst.stopping) continue;
             if(!first) json.append(',');
             first = false;
             json.append("{\"sector\":\"").append(esc(inst.sector)).append("\",\"port\":").append(inst.port)

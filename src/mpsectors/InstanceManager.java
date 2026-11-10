@@ -78,12 +78,19 @@ public class InstanceManager{
     }
 
     public synchronized int runningCount(){
-        return instances.size;
+        int count = 0;
+        for(Instance i : instances){
+            if(!i.stopping) count++;
+        }
+        return count;
     }
 
     public synchronized int totalPlayers(){
         int sum = 0;
-        for(Instance i : instances) sum += i.players;
+        for(Instance i : instances){
+            //a stopping instance's status is stale; its players are already disconnecting
+            if(!i.stopping) sum += i.players;
+        }
         return sum;
     }
 
@@ -99,6 +106,28 @@ public class InstanceManager{
 
     public Instance start(String sector, String loadout, String resources){
         Instance out;
+
+        //a sector being stopped lingers in the list until its process exits; wait instead
+        //of handing a dying instance to a player who lands during the stop
+        long stopDeadline = System.currentTimeMillis() + 45_000L;
+        while(true){
+            synchronized(this){
+                Instance existing = get(sector);
+                if(existing == null) break;
+                if(!existing.stopping) return existing;
+            }
+
+            if(System.currentTimeMillis() > stopDeadline){
+                Log.err("[mp-sectors] sector @ did not stop in time", sector);
+                return null;
+            }
+            try{
+                Thread.sleep(500);
+            }catch(InterruptedException e){
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
 
         try{
             synchronized(this){
@@ -224,6 +253,10 @@ public class InstanceManager{
             if(inst.stopping) continue;
 
             if(inst.process != null && !inst.process.isAlive()){
+                //start() is still waiting for the port and owns cleanup of a failed boot;
+                //handling it here too would race the original start and restart without loadout
+                if(!inst.ready) continue;
+
                 String reason = readExitReason(inst);
                 instances.remove(i);
 
