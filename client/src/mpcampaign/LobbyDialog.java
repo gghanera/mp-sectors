@@ -456,7 +456,9 @@ public class LobbyDialog extends PlanetDialog{
 
         dialog.buttons.button("Обновить", Icon.refresh, () -> {
             dialog.hide();
-            MpCampaignMod.refresh(() -> Core.app.post(this::showWho));
+            MpCampaignMod.refresh(() -> {
+                if(isShown()) Core.app.post(this::showWho);
+            });
         }).size(170f, 46f);
         dialog.addCloseButton();
         dialog.show();

@@ -104,12 +104,10 @@ public class MpSectorsMod extends Mod{
             lastChatMessage = e.message;
             lastChatTime = now;
 
-            //the event fires before the vanilla word filter; relay what players will actually see
+            //relay the raw event text: calling admins.filterMessage() here would run the
+            //vanilla anti-spam filter once already, and the server runs it again right after
+            //this event - every first message would look like a duplicate
             String message = e.message;
-            if(Vars.netServer != null && Vars.netServer.admins != null){
-                message = Vars.netServer.admins.filterMessage(e.player, message);
-                if(message == null || message.isEmpty()) return;
-            }
 
             if(!allowRelayChat(name)){
                 e.player.sendMessage("[scarlet]Слишком много сообщений, подождите.");

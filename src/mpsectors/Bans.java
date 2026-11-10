@@ -80,7 +80,12 @@ public final class Bans{
 
     /** @return false if the name was already banned. */
     public static synchronized boolean add(String name){
-        if(name == null || name.isBlank() || contains(name)) return false;
+        if(name == null || name.isBlank()) return false;
+
+        //the coordinator and every instance write this file; merge before changing it
+        reloadIfChanged();
+        if(contains(name)) return false;
+
         names.add(name.trim());
         save();
         return true;
@@ -90,6 +95,7 @@ public final class Bans{
     public static synchronized boolean remove(String name){
         if(name == null) return false;
 
+        reloadIfChanged();
         for(int i = 0; i < names.size(); i++){
             if(names.get(i).equalsIgnoreCase(name)){
                 names.remove(i);

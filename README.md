@@ -355,7 +355,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.2.0     # dist\MP-Sectors-2.2.0.zip
+.\package.ps1 -Version 2.2.1     # dist\MP-Sectors-2.2.1.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

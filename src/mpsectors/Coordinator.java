@@ -213,6 +213,8 @@ public class Coordinator{
     private long chatId;
     private Fi chatFile;
     private final ObjectMap<String, long[]> chatRate = new ObjectMap<>();
+    private final ObjectMap<String, String> chatText = new ObjectMap<>();
+    private final ObjectMap<String, Long> chatTextTime = new ObjectMap<>();
     private static final int maxChatMessages = 200;
     private static final int chatBurst = 5;
     private static final long chatWindow = 10_000L;
@@ -276,11 +278,11 @@ public class Coordinator{
             Moderators.init(campaign);
             Bans.init(campaign);
 
-            Vars.netServer.admins.setPlayerLimit(config.maxPlayers);
-            Vars.netServer.openServer();
-
             //a campaign paused before a coordinator restart stays paused
             paused = campaign.child("paused.flag").exists();
+
+            Vars.netServer.admins.setPlayerLimit(config.maxPlayers);
+            Vars.netServer.openServer();
             if(paused) MpSectorsMod.adminPause(true);
 
             lastAutosave = System.currentTimeMillis();
@@ -1208,7 +1210,7 @@ public class Coordinator{
 
             //the client input is already limited, but direct requests are not
             if(req.message.length() > 300) req.message = req.message.substring(0, 300);
-            if(!allowChat(req.player)) return "{\"ok\":false,\"error\":\"Слишком много сообщений, подождите.\"}";
+            if(!allowChat(req.player, req.message)) return "{\"ok\":false,\"error\":\"Слишком много сообщений, подождите.\"}";
 
             synchronized(chat){
                 ChatMessage message = new ChatMessage();
@@ -1263,8 +1265,8 @@ public class Coordinator{
         return json.toString();
     }
 
-    /** Sliding 10 s window: five relayed messages per player. */
-    private boolean allowChat(String player){
+    /** Sliding 10 s window: five relayed messages per player, and no identical line twice. */
+    private boolean allowChat(String player, String message){
         String key = player == null || player.isEmpty() ? "?" : player;
         long now = System.currentTimeMillis();
 
@@ -1279,6 +1281,13 @@ public class Coordinator{
                 state[1] = 0;
             }
             if(state[1] >= chatBurst) return false;
+
+            String last = chatText.get(key);
+            long lastTime = chatTextTime.get(key, 0L);
+            if(message != null && message.equals(last) && now - lastTime < 10_000L) return false;
+
+            chatText.put(key, message);
+            chatTextTime.put(key, now);
             state[1]++;
         }
         return true;

@@ -87,7 +87,12 @@ public final class Moderators{
 
     /** @return false if the name was already a moderator. */
     public static synchronized boolean add(String name){
-        if(name == null || name.isBlank() || contains(name)) return false;
+        if(name == null || name.isBlank()) return false;
+
+        //the coordinator and every instance write this file; merge before changing it
+        reloadIfChanged();
+        if(contains(name)) return false;
+
         names.add(name.trim());
         save();
         return true;
@@ -95,7 +100,10 @@ public final class Moderators{
 
     /** @return false if the name was not a moderator, or if it is the last one. */
     public static synchronized boolean remove(String name){
-        if(name == null || names.size() <= 1) return false;
+        if(name == null) return false;
+
+        reloadIfChanged();
+        if(names.size() <= 1) return false;
 
         for(int i = 0; i < names.size(); i++){
             if(names.get(i).equalsIgnoreCase(name)){
