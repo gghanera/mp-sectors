@@ -286,6 +286,7 @@ public class Coordinator{
                     return;
                 }
             }
+            ensureHomeEndless();
 
             Core.settings.put("port", config.gamePort);
             Core.settings.put("strict", !config.allowDuplicateClients);
@@ -784,6 +785,7 @@ public class Coordinator{
 
             home = next;
             homeSector = key;
+            ensureHomeEndless();
             lastAutosave = System.currentTimeMillis();
             lastSnapshot = System.currentTimeMillis();
 
@@ -1986,6 +1988,39 @@ public class Coordinator{
         }
     }
 
+    /**
+     * The campaign's starting sector (Ground Zero) is a finite tutorial in vanilla: it ends at
+     * the preset's capture wave, after which waves stop. The mod uses it as the home lobby, so
+     * keep its waves endless there instead of turning the start into a silent base.
+     */
+    private void ensureHomeEndless(){
+        if(home == null || !home.loaded) return;
+
+        Sector sector = home.sector();
+        if(sector == null || sector.id != sector.planet.startSector) return;
+
+        //0 is replaced with 30 by SectorInfo.write() on the next save; use a wave nobody reaches
+        final int endlessWave = 9999;
+        if(Vars.state.rules != null){
+            Vars.state.rules.waves = true;
+            Vars.state.rules.winWave = endlessWave;
+        }
+
+        if(sector.info == null || (sector.info.waves && sector.info.winWave == endlessWave)) return;
+
+        try{
+            SectorRunner.withCampaignLock(campaign, () -> {
+                sector.info.waves = true;
+                sector.info.winWave = endlessWave;
+                sector.info.prepare(sector);
+                SectorRunner.writeAtomic(home.campaignInfo, JsonIO.write(sector.info));
+            });
+            Log.info("[mp-sectors] start sector @ is endless", homeSector);
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not make the start sector endless", t);
+        }
+    }
+
     /** The home sector's core was destroyed: keep the save, mark it unowned, stop autosaving it. */
     public void homeLost(){
         if(home == null || !home.loaded) return;
@@ -2833,6 +2868,7 @@ public class Coordinator{
 
         home = next;
         homeSector = key;
+        ensureHomeEndless();
         writeHome(key);
     }
 

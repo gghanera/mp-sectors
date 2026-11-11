@@ -256,6 +256,9 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   research/moderators/bans aborts creation instead of silently losing them.
 - **2.4.5** (server 0.6.4): crash recovery prefers the whole `campaign.old` over a possibly
   partial copy; company switch only accepts a directory.
+- **2.4.6** (server 0.6.5): the campaign's starting sector (Ground Zero / the planet start)
+  keeps endless waves; it no longer switches to the finite tutorial capture wave and goes silent
+  after being captured.
 
 ### Co-op tools (2.3.0)
 
@@ -396,7 +399,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.4.5     # dist\MP-Sectors-2.4.5.zip
+.\package.ps1 -Version 2.4.6     # dist\MP-Sectors-2.4.6.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of
