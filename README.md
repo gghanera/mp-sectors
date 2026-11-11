@@ -224,8 +224,16 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   sectors until `/resumeall`; returning to the home lobby is still allowed.
 - **Two windows on one PC** for testing: duplicate clients are allowed by default.
 
-### Co-op tools (2.2.0)
+### Co-op tools (2.3.0)
 
+- **Campaign notifications**: landing, capture, loss, attack and «attack repelled» are written
+  to the chat of every sector, not only to the history.
+- **Event feed**: the map's «События» button opens the last 50 events; events with a sector
+  have a «Показать» button that selects it on the map.
+- **Sector search and sort**: the sector list has a search field (name/note/key) and sorting
+  by name, wave or production.
+- **Admin health and bans**: the admin panel lists campaign bans (ban/unban), uptime,
+  snapshot count and last snapshot, free disk space and JVM memory.
 - **`/who` and «Кто где»**: `/who` prints who is in which sector; the map's «Кто где» button
   opens the same list. Names come from the coordinator's live player count.
 - **Chat survives restarts**: the last 200 lines are stored in `campaign/chat.json` and
@@ -355,7 +363,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.2.3     # dist\MP-Sectors-2.2.3.zip
+.\package.ps1 -Version 2.3.0     # dist\MP-Sectors-2.3.0.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

@@ -31,6 +31,9 @@ try{
     Copy-Item $Campaign (Join-Path $root 'campaign') -Recurse -Force
     Copy-Item $ModJar (Join-Path $coordinator 'config\mods\mp-sectors.jar') -Force
 
+    #the dev campaign may have extra moderators; make the last-moderator check deterministic
+    Set-Content (Join-Path $root 'campaign\moderators.json') '["GGhanera"]' -NoNewline -Encoding utf8
+
     $cfg = @{
         campaign = (Join-Path $root 'campaign').Replace('\', '/')
         httpPort = $HttpPort

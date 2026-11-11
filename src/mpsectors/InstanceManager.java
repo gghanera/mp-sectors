@@ -33,6 +33,8 @@ public class InstanceManager{
         public volatile String[] playerNames = {};
         public volatile String steamHost = "";
         public volatile long steamId;
+        public volatile boolean attacked;
+        public volatile boolean statusSeen;
         public long emptySince;
         public long started;
         public boolean stopping;
@@ -53,6 +55,7 @@ public class InstanceManager{
         public int wave = 1;
         public String steamHost = "";
         public long steamId;
+        public boolean attacked;
     }
 
     private final Coordinator.Config config;
@@ -279,6 +282,8 @@ public class InstanceManager{
                 inst.playerNames = status.players == null ? new String[0] : status.players;
                 inst.steamHost = status.steamHost == null ? "" : status.steamHost;
                 inst.steamId = status.steamId;
+                inst.attacked = status.attacked;
+                inst.statusSeen = true;
             }
 
             if(inst.players > 0){

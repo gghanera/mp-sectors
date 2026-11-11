@@ -3,6 +3,7 @@ package mpsectors;
 import arc.Core;
 import arc.files.Fi;
 import arc.struct.ObjectMap;
+import arc.struct.ObjectSet;
 import arc.struct.Seq;
 import arc.util.Log;
 import arc.util.Nullable;
@@ -191,6 +192,9 @@ public class Coordinator{
     private volatile int homePlayers;
     private volatile String[] homePlayerNames = {};
     private long limitSince, lastLimitKick;
+    private final ObjectMap<String, Boolean> attackState = new ObjectMap<>();
+    private long lastAttackCheck;
+    private long startedAt;
     private long lastAutosave;
     private long lastImportRefresh;
     private HttpServer http;
@@ -238,6 +242,8 @@ public class Coordinator{
     }
 
     public void start(){
+        startedAt = System.currentTimeMillis();
+
         //a stale stop flag from a killed process would shut the fresh coordinator down immediately
         stopFile.delete();
 
@@ -331,6 +337,7 @@ public class Coordinator{
         instances.tick();
 
         long now = System.currentTimeMillis();
+        checkAttacks(now);
         enforcePlayerLimit(now);
 
         if(config.updateCheck && now - lastUpdateCheck >= 24L * 60L * 60L * 1000L){
@@ -959,7 +966,7 @@ public class Coordinator{
         }
     }
 
-    private synchronized void addHistory(String type, String sector, String player, String text){
+    private synchronized boolean addHistory(String type, String sector, String player, String text){
         HistoryEvent event = new HistoryEvent();
         event.time = System.currentTimeMillis();
         event.type = type == null ? "" : type;
@@ -972,30 +979,58 @@ public class Coordinator{
             HistoryEvent last = history.get(history.size() - 1);
             if(last.type.equals(event.type) && last.sector.equals(event.sector)
                 && Math.abs(event.time - last.time) < 10 * 60 * 1000L){
-                return;
+                return false;
             }
         }
 
         history.add(event);
         while(history.size() > maxHistoryEvents) history.remove(0);
 
-        if(historyFile == null) return;
-        try{
-            HistoryList list = new HistoryList();
-            list.events = history.toArray(new HistoryEvent[0]);
-            SectorRunner.writeAtomic(historyFile, JsonIO.write(list));
-        }catch(Throwable t){
-            Log.err("[mp-sectors] could not write history.json", t);
+        if(historyFile != null){
+            try{
+                HistoryList list = new HistoryList();
+                list.events = history.toArray(new HistoryEvent[0]);
+                SectorRunner.writeAtomic(historyFile, JsonIO.write(list));
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not write history.json", t);
+            }
         }
+        return true;
+    }
+
+    /** Writes the history line and, for the important events, a campaign-wide chat notification. */
+    private void notifyEvent(String type, String sector, String player, String historyText){
+        if(!addHistory(type, sector, player, historyText)) return;
+
+        String label = sectorLabel(sector);
+        String message = switch(type){
+            case "land" -> "Высадка: " + label
+                + (player == null || player.isEmpty() ? "" : " — " + player);
+            case "lost" -> label + " потерян";
+            case "capture" -> label + " захвачен";
+            case "attack" -> label + " атакован";
+            case "defend" -> "Атака на " + label + " отбита";
+            default -> historyText;
+        };
+        addSystemChat(message);
+    }
+
+    private String sectorLabel(String key){
+        Sector sector = sectorForKey(key);
+        return sector == null ? (key == null || key.isEmpty() ? "?" : key) : sector.name();
     }
 
     private String historyJson(HttpExchange ex) throws IOException{
         if("POST".equalsIgnoreCase(ex.getRequestMethod())){
             HistoryEvent req = JsonIO.read(HistoryEvent.class, body(ex));
-            if(req == null || req.type == null || !req.type.matches("lost|capture|land|snapshot|restore|home|pads|note")){
+            if(req == null || req.type == null || !req.type.matches("lost|capture|land|attack|defend|snapshot|restore|home|pads|note")){
                 return "{\"ok\":false}";
             }
-            addHistory(req.type, req.sector, req.player, req.text);
+            if(req.type.matches("lost|capture|land|attack|defend")){
+                notifyEvent(req.type, req.sector, req.player, req.text);
+            }else{
+                addHistory(req.type, req.sector, req.player, req.text);
+            }
             return "{\"ok\":true}";
         }
 
@@ -1401,6 +1436,51 @@ public class Coordinator{
         addHistory("watchdog", "", "", text);
     }
 
+    /** Notifies all sectors when a sector's attacked state flips. */
+    private void checkAttacks(long now){
+        if(now - lastAttackCheck < 2000L) return;
+        lastAttackCheck = now;
+
+        ObjectSet<String> current = new ObjectSet<>();
+
+        if(home != null && home.loaded){
+            Sector sector = home.sector();
+            if(sector != null){
+                boolean attacked = sector.info != null && sector.info.hasCore
+                    && (sector.info.waves || sector.info.attack);
+                updateAttack(homeSector, attacked, current);
+            }
+        }
+
+        for(InstanceManager.Instance inst : instances.all()){
+            if(inst.stopping || !inst.statusSeen) continue;
+            updateAttack(inst.sector, inst.attacked, current);
+        }
+
+        Seq<String> remove = new Seq<>();
+        for(String key : attackState.keys()){
+            if(!current.contains(key)) remove.add(key);
+        }
+        for(String key : remove) attackState.remove(key);
+    }
+
+    private void updateAttack(String key, boolean attacked, ObjectSet<String> current){
+        if(key == null || key.isEmpty()) return;
+        current.add(key);
+
+        Boolean previous = attackState.get(key);
+        if(previous == null){
+            //do not announce the state a sector already had when it was loaded
+            attackState.put(key, attacked);
+            return;
+        }
+        if(previous == attacked) return;
+
+        attackState.put(key, attacked);
+        notifyEvent(attacked ? "attack" : "defend", key, "",
+            attacked ? "Сектор атакован" : "Атака отбита");
+    }
+
     /**
      * Direct connections to an instance port bypass the maxPlayers check in /land. If the
      * campaign stays over the limit for five seconds, kick the extra players.
@@ -1573,7 +1653,7 @@ public class Coordinator{
         home.save();
         home.markLost();
         home.loaded = false;
-        addHistory("lost", homeSector, "", "Домашний сектор потерян");
+        notifyEvent("lost", homeSector, "", "Домашний сектор потерян");
 
         //do not keep serving a dead world on the home port until the coordinator restarts
         for(Player player : Groups.player.copy()){
@@ -1591,7 +1671,7 @@ public class Coordinator{
         if(home == null || !home.loaded) return;
         home.save();
         home.markCaptured();
-        addHistory("capture", homeSector, "", "Домашний сектор захвачен");
+        notifyEvent("capture", homeSector, "", "Домашний сектор захвачен");
         home.loaded = false;
         //the vanilla game-over code may rotate to a built-in map; reload the real home after it
         Core.app.post(this::reloadHome);
@@ -1726,7 +1806,7 @@ public class Coordinator{
                 synchronized(this){
                     Boolean previous = this.captured.get(key);
                     if(previous != null && !previous && captured){
-                        addHistory("capture", key, "", "Сектор захвачен");
+                        notifyEvent("capture", key, "", "Сектор захвачен");
                     }
                     this.captured.put(key, captured);
                 }
@@ -1838,7 +1918,6 @@ public class Coordinator{
                 out.error = "Не удалось запустить сектор.";
                 return landJson(out);
             }
-            addHistory("land", key, req.player, "Запуск сектора");
         }
 
         //another player may be landing on the same sector right now
@@ -1863,6 +1942,8 @@ public class Coordinator{
         if(req.accelerator && req.resources != null && !req.resources.isEmpty() && snap.hasBase.get(key, false)){
             command(inst.sector, "cargo", req.resources);
         }
+
+        notifyEvent("land", key, req.player, "Высадка в сектор");
 
         if(config.steam){
             for(int i = 0; i < 40 && inst.steamHost.isEmpty(); i++){
@@ -2063,11 +2144,28 @@ public class Coordinator{
         json.append("\"paused\":").append(paused).append(',');
         json.append("\"serverVersion\":\"").append(esc(modVersion("mp-sectors"))).append("\",");
         json.append("\"campaignVersion\":\"").append(esc(modVersion("mp-campaign"))).append("\",");
+        json.append("\"uptime\":").append(startedAt == 0 ? 0 : System.currentTimeMillis() - startedAt).append(',');
+        json.append("\"snapshotCount\":").append(snapshots().size() + dailySnapshots().size()).append(',');
+        json.append("\"lastSnapshot\":").append(lastSnapshot).append(',');
+        java.io.File backup = snapshotsDir == null ? null : snapshotsDir.file();
+        boolean backupOk = backup != null && backup.exists();
+        json.append("\"diskFree\":").append(backupOk ? backup.getUsableSpace() : -1).append(',');
+        json.append("\"diskTotal\":").append(backupOk ? backup.getTotalSpace() : -1).append(',');
+        Runtime runtime = Runtime.getRuntime();
+        json.append("\"memoryUsed\":").append(runtime.totalMemory() - runtime.freeMemory()).append(',');
+        json.append("\"memoryMax\":").append(runtime.maxMemory()).append(',');
         json.append("\"moderators\":[");
         String[] moderators = Moderators.list();
         for(int i = 0; i < moderators.length; i++){
             if(i > 0) json.append(',');
             json.append('"').append(esc(moderators[i])).append('"');
+        }
+        json.append("],");
+        json.append("\"bans\":[");
+        String[] bans = Bans.list();
+        for(int i = 0; i < bans.length; i++){
+            if(i > 0) json.append(',');
+            json.append('"').append(esc(bans[i])).append('"');
         }
         json.append("],");
         json.append("\"homePlayers\":[");

@@ -1009,6 +1009,12 @@ public class MpSectorsMod extends Mod{
             StringBuilder json = new StringBuilder("{\"sector\":\"").append(runner.sectorName).append("\",");
             json.append("\"count\":").append(Groups.player.size()).append(',');
             json.append("\"wave\":").append(Vars.state.wave).append(',');
+
+            Sector current = runner.sector();
+            boolean attacked = current != null && current.info != null && current.info.hasCore
+                && (current.info.waves || current.info.attack);
+            json.append("\"attacked\":").append(attacked).append(',');
+
             json.append("\"steamHost\":\"").append(SteamSupport.lobbyHandle() == 0 ? "" : "steam:" + SteamSupport.lobbyHandle()).append("\",");
             json.append("\"steamId\":").append(SteamSupport.steamId()).append(',');
             json.append("\"players\":[");

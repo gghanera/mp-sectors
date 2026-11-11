@@ -7,6 +7,9 @@ import mindustry.Vars;
 import mindustry.gen.Icon;
 import mindustry.ui.dialogs.BaseDialog;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
+
 /**
  * Moderator panel for the running campaign.
  *
@@ -75,12 +78,26 @@ public class AdminDialog extends BaseDialog{
         int running = MpCampaignMod.num(status, "sectors", 1);
         int maxSectors = MpCampaignMod.num(status, "maxSectors", 5);
         int maxPlayers = MpCampaignMod.num(status, "maxPlayers", 10);
+        long uptime = MpCampaignMod.numLong(status, "uptime", 0);
+        int snapshotCount = MpCampaignMod.num(status, "snapshotCount", 0);
+        long lastSnapshot = MpCampaignMod.numLong(status, "lastSnapshot", 0);
+        long diskFree = MpCampaignMod.numLong(status, "diskFree", -1);
+        long diskTotal = MpCampaignMod.numLong(status, "diskTotal", -1);
+        long memoryUsed = MpCampaignMod.numLong(status, "memoryUsed", 0);
+        long memoryMax = MpCampaignMod.numLong(status, "memoryMax", 0);
 
         body.add("[accent]Кампания").left().row();
         body.add("[lightgray]игроки: [white]" + players + "/" + maxPlayers
             + "   [lightgray]секторы: [white]" + running + "/" + maxSectors
             + "   [lightgray]дом: [white]" + sectorName(sectors, home)
             + "   [lightgray]режим: " + (MpCampaignMod.paused ? "[scarlet]пауза[]" : "[green]идёт[]"))
+            .width(500f).wrap().left().row();
+        body.add("[lightgray]аптайм: [white]" + formatDuration(uptime)
+            + "   [lightgray]снимки: [white]" + snapshotCount
+            + "   [lightgray]последний: [white]" + (lastSnapshot > 0 ? formatTime(lastSnapshot) : "—"))
+            .width(500f).wrap().left().row();
+        body.add("[lightgray]диск: [white]" + formatBytes(diskFree) + " из " + formatBytes(diskTotal)
+            + "   [lightgray]память: [white]" + formatBytes(memoryUsed) + "/" + formatBytes(memoryMax))
             .width(500f).wrap().left().row();
         body.add().height(6f).row();
 
@@ -172,6 +189,61 @@ public class AdminDialog extends BaseDialog{
                 if(!name.isEmpty()) post("modadd", null, name, null);
             }).size(150f, 44f).padLeft(6f);
         }).left().row();
+
+        // ---- bans ----
+        body.add().height(8f).row();
+        body.add("[accent]Баны").left().row();
+
+        Table banList = new Table();
+        banList.top().left();
+        body.add(banList).growX().left().row();
+
+        Jval bans = status.get("bans");
+        if(bans != null && bans.isArray() && !bans.asArray().isEmpty()){
+            for(Jval value : bans.asArray()){
+                String name = value.asString();
+                if(name == null || name.isEmpty()) continue;
+
+                Table row = new Table();
+                row.left();
+                row.add("[white]" + name + "[]").width(280f).wrap().left();
+                row.button("Разбанить", Icon.cancel, () -> post("unban", null, name, null)).size(150f, 40f);
+                banList.add(row).growX().left().padBottom(2f).row();
+            }
+        }else{
+            banList.add("[lightgray]Банов нет.").left().row();
+        }
+
+        String[] addedBan = {""};
+        banList.table(row -> {
+            row.left();
+            row.field("", value -> addedBan[0] = value).width(280f).height(44f);
+            row.button("Забанить", Icon.cancel, () -> {
+                String name = addedBan[0] == null ? "" : addedBan[0].trim();
+                if(!name.isEmpty()) post("ban", null, name, null);
+            }).size(150f, 44f).padLeft(6f);
+        }).left().row();
+    }
+
+    private static String formatDuration(long ms){
+        long seconds = Math.max(0, ms / 1000L);
+        long days = seconds / 86400L;
+        long hours = (seconds % 86400L) / 3600L;
+        long minutes = (seconds % 3600L) / 60L;
+        if(days > 0) return days + " д " + hours + " ч";
+        if(hours > 0) return hours + " ч " + minutes + " мин";
+        return minutes + " мин";
+    }
+
+    private static String formatBytes(long bytes){
+        if(bytes < 0) return "?";
+        if(bytes >= 1024L * 1024L * 1024L) return String.format("%.1f ГБ", bytes / 1024f / 1024f / 1024f);
+        if(bytes >= 1024L * 1024L) return String.format("%.0f МБ", bytes / 1024f / 1024f);
+        return String.format("%.0f КБ", bytes / 1024f);
+    }
+
+    private static String formatTime(long time){
+        return new SimpleDateFormat("dd.MM HH:mm").format(new Date(time));
     }
 
     private void addSectorRow(Table list, String key, String info, Jval names, boolean home, Jval sectors){

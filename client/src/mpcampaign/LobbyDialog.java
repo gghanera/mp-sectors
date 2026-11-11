@@ -214,7 +214,7 @@ public class LobbyDialog extends PlanetDialog{
         panel.table(row -> {
             row.defaults().height(36f).padRight(6f);
             row.button("Кто где", Icon.players, this::showWho).width(120f);
-            row.button("История", Icon.list, this::showHistory).width(120f);
+            row.button("События", Icon.list, this::showHistory).width(120f);
             if(MpCampaignMod.isModerator()){
                 row.button("Админка", Icon.admin, MpCampaignMod::openAdmin).width(120f);
             }
@@ -374,38 +374,103 @@ public class LobbyDialog extends PlanetDialog{
         return Integer.toString(value);
     }
 
-    /** Opens a list of sectors matching a status filter; clicking one selects it on the map. */
+    /** Opens a list of sectors matching a status filter; search and sort are available. */
     private void showSectorList(String mode){
         BaseDialog dialog = new BaseDialog("Секторы");
+        Table list = new Table();
+        list.top().left();
 
-        ArrayList<MpCampaignMod.Entry> list = new ArrayList<>();
-        for(MpCampaignMod.Entry entry : MpCampaignMod.entries.values()){
-            if(matches(entry, mode)) list.add(entry);
-        }
-        list.sort(Comparator.comparing(MpCampaignMod::displayName));
+        String[] query = {""};
+        int[] sort = {0};
 
-        dialog.cont.pane(t -> {
-            t.top().left();
-            if(list.isEmpty()){
-                t.add("[lightgray]Нет секторов под этот фильтр.").left().row();
+        Runnable rebuild = () -> {
+            list.clear();
+            ArrayList<MpCampaignMod.Entry> entries = new ArrayList<>();
+            String q = query[0].toLowerCase();
+
+            for(MpCampaignMod.Entry entry : MpCampaignMod.entries.values()){
+                if(matches(entry, mode) && contains(entry, q)) entries.add(entry);
+            }
+
+            Comparator<MpCampaignMod.Entry> comparator;
+            if(sort[0] == 1){
+                comparator = (a, b) -> Integer.compare(infoWave(b), infoWave(a));
+            }else if(sort[0] == 2){
+                comparator = (a, b) -> Float.compare(infoProduction(b), infoProduction(a));
+            }else{
+                comparator = Comparator.comparing(MpCampaignMod::displayName);
+            }
+            entries.sort(comparator);
+
+            if(entries.isEmpty()){
+                list.add("[lightgray]Ничего не найдено.").left().row();
                 return;
             }
 
-            for(MpCampaignMod.Entry entry : list){
-                t.table(row -> {
+            for(MpCampaignMod.Entry entry : entries){
+                list.table(row -> {
                     row.left();
-                    row.add("[accent]" + MpCampaignMod.displayName(entry)).width(240f).left();
-                    row.add(statusOf(entry)).width(230f).left();
+                    row.add("[accent]" + MpCampaignMod.displayName(entry)).width(230f).wrap().left();
+                    row.add(statusOf(entry)).width(180f).left();
+                    row.add("[lightgray]" + infoLine(entry) + "[]").width(190f).left();
                     row.button("Выбрать", Icon.map, () -> {
                         dialog.hide();
                         selected = sectorOf(entry);
-                    }).size(150f, 44f);
+                    }).size(140f, 42f);
                 }).growX().left().padBottom(4f).row();
             }
-        }).grow();
+        };
 
+        dialog.cont.table(t -> {
+            t.left();
+            t.field("", value -> {
+                query[0] = value == null ? "" : value.trim();
+                rebuild.run();
+            }).width(250f).height(44f);
+            t.button("Имя", () -> {
+                sort[0] = 0;
+                rebuild.run();
+            }).size(80f, 44f).padLeft(4f);
+            t.button("Волна", () -> {
+                sort[0] = 1;
+                rebuild.run();
+            }).size(90f, 44f).padLeft(4f);
+            t.button("Добыча", () -> {
+                sort[0] = 2;
+                rebuild.run();
+            }).size(100f, 44f).padLeft(4f);
+        }).left().row();
+
+        dialog.cont.pane(list).grow().maxHeight(Core.graphics.getHeight() * 0.65f).row();
         dialog.addCloseButton();
+        rebuild.run();
         dialog.show();
+    }
+
+    private static boolean contains(MpCampaignMod.Entry entry, String query){
+        if(query == null || query.isEmpty()) return true;
+
+        String name = entry.name == null ? "" : entry.name.toLowerCase();
+        String title = entry.title == null ? "" : entry.title.toLowerCase();
+        String note = entry.note == null ? "" : entry.note.toLowerCase();
+        return name.contains(query) || title.contains(query) || note.contains(query)
+            || (entry.planet + "-" + entry.id).contains(query);
+    }
+
+    private static int infoWave(MpCampaignMod.Entry entry){
+        return entry.parsed == null ? 0 : entry.parsed.wave;
+    }
+
+    private static float infoProduction(MpCampaignMod.Entry entry){
+        return entry.parsed == null ? 0f : sum(entry.parsed.production);
+    }
+
+    private static String infoLine(MpCampaignMod.Entry entry){
+        if(entry.parsed == null) return "";
+        SectorInfo info = entry.parsed;
+
+        String wave = info.waves ? "волна " + info.wave : "без волн";
+        return wave + "  +" + Math.round(sum(info.production) * 60f) + "/мин";
     }
 
     private static boolean matches(MpCampaignMod.Entry entry, String mode){
@@ -484,13 +549,13 @@ public class LobbyDialog extends PlanetDialog{
     }
 
     private void showHistory(){
-        BaseDialog dialog = new BaseDialog("История кампании");
+        BaseDialog dialog = new BaseDialog("Лента событий");
 
         Table list = new Table();
         list.top().left();
         list.add("[lightgray]Загрузка...").left().row();
 
-        dialog.cont.pane(list).grow();
+        dialog.cont.pane(list).grow().maxHeight(Core.graphics.getHeight() * 0.65f);
 
         Http.get(MpCampaignMod.url() + "/history", json -> {
             list.clear();
@@ -506,14 +571,27 @@ public class LobbyDialog extends PlanetDialog{
             }
 
             SimpleDateFormat format = new SimpleDateFormat("dd.MM HH:mm");
+            int shown = 0;
             for(Jval value : array.asArray()){
+                if(shown++ >= 50) break;
+
                 String text = MpCampaignMod.str(value, "text");
                 String sector = MpCampaignMod.str(value, "sector");
                 long time = MpCampaignMod.numLong(value, "time", 0);
 
-                String line = "[lightgray]" + format.format(new Date(time)) + "  [white]" + text;
-                if(!sector.isEmpty()) line += " [lightgray](" + sector + ")";
-                list.add(line).left().padBottom(2f).row();
+                Table row = new Table();
+                row.left();
+                row.add("[lightgray]" + format.format(new Date(time)) + "  [white]" + text
+                    + (sector.isEmpty() ? "" : " [lightgray](" + sector + ")")).width(430f).wrap().left();
+
+                Sector target = sector.isEmpty() ? null : MpCampaignMod.sectorByKey(sector);
+                if(target != null){
+                    row.button("Показать", Icon.map, () -> {
+                        dialog.hide();
+                        selected = target;
+                    }).size(130f, 38f);
+                }
+                list.add(row).growX().left().padBottom(2f).row();
             }
         });
 
