@@ -108,6 +108,11 @@ public class MpSectorsMod extends Mod{
                 return;
             }
 
+            if(coordinator != null && coordinator.isBusy()){
+                e.player.kick(KickReason.serverRestarting);
+                return;
+            }
+
             Log.info("[mp-sectors] player connected: @", name);
             if(e.player.con != null) Call.clientPacketReliable(e.player.con, speedPacket, Float.toString(gameSpeed));
         });

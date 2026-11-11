@@ -266,6 +266,7 @@ public class Coordinator{
             }
             if(config.javaPath == null || config.javaPath.isEmpty()) config.javaPath = Vars.javaPath;
 
+            recoverCampaignSwap();
             homeSector = readHomeSector();
             if(homeSector == null){
                 Log.err("[mp-sectors] coordinator: no sector saves in @", campaign.child("sectors").absolutePath());
@@ -640,6 +641,7 @@ public class Coordinator{
         try{
             //instances save their sectors on stop; the snapshot is copied over them afterwards
             instances.stopAll();
+            kickHomePlayers();
 
             //the home autosaves on a timer, so its last minute would be lost by a rollback
             if(!saveHomeBlocking()){
@@ -696,6 +698,26 @@ public class Coordinator{
             restoring = false;
             Log.err("[mp-sectors] could not restore the campaign", t);
             return "{\"ok\":false,\"error\":\"Ошибка восстановления: " + esc(String.valueOf(t.getMessage())) + "\"}";
+        }
+    }
+
+    /** Disconnects home players before a campaign swap, so nothing changes after the save. */
+    private void kickHomePlayers(){
+        CountDownLatch latch = new CountDownLatch(1);
+        Core.app.post(() -> {
+            try{
+                for(Player player : Groups.player.copy()){
+                    player.kick(KickReason.serverRestarting);
+                }
+            }finally{
+                latch.countDown();
+            }
+        });
+
+        try{
+            latch.await(5, TimeUnit.SECONDS);
+        }catch(InterruptedException e){
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -1608,6 +1630,11 @@ public class Coordinator{
         return paused;
     }
 
+    /** True while a snapshot restore or company switch is rewriting the campaign. */
+    public boolean isBusy(){
+        return restoring;
+    }
+
     public boolean isStarted(){
         return started;
     }
@@ -1693,8 +1720,8 @@ public class Coordinator{
     private String readCompany(){
         try{
             if(companyFile != null && companyFile.exists()){
-                String name = companyFile.readString().trim();
-                if(!name.isEmpty()) return name;
+                String safe = sanitizeCompany(companyFile.readString());
+                if(safe != null) return safe;
             }
         }catch(Throwable t){
             Log.err("[mp-sectors] could not read companies/current.txt", t);
@@ -1729,7 +1756,22 @@ public class Coordinator{
         String out = name.trim();
         if(out.isEmpty() || out.length() > 40) return null;
         if(!out.matches("[\\p{L}\\p{N} _-]+")) return null;
+
+        String lower = out.toLowerCase(java.util.Locale.ROOT);
+        //temp archive names and Windows device names cannot be used as folders
+        if(lower.startsWith("tmp-") || lower.matches("con|prn|aux|nul|com[1-9]|lpt[1-9]")) return null;
         return out;
+    }
+
+    /** The campaign planet's vanilla start sector (Serpulo-170, Erekir-10, ...). */
+    private String startSectorKey(){
+        Planet planet = null;
+        if(home != null){
+            Sector sector = home.sector();
+            if(sector != null) planet = sector.planet;
+        }
+        if(planet == null) planet = campaignPlanet();
+        return planet == null ? null : planet.name + "-" + planet.startSector;
     }
 
     private String companyCreate(String name, String player){
@@ -1744,6 +1786,7 @@ public class Coordinator{
         Log.info("[mp-sectors] creating company @", safe);
         try{
             instances.stopAll();
+            kickHomePlayers();
             if(!saveHomeBlocking()) throw new IllegalStateException("не удалось сохранить домашний сектор");
             archiveCompany(company);
 
@@ -1754,7 +1797,18 @@ public class Coordinator{
             copyIfExists(campaign.child("unlocks.json"), tmp.child("unlocks.json"));
             copyIfExists(campaign.child("moderators.json"), tmp.child("moderators.json"));
             copyIfExists(campaign.child("bans.json"), tmp.child("bans.json"));
-            copyIfExists(campaign.child("home.json"), tmp.child("home.json"));
+
+            //a new company starts at the vanilla starting sector of the current planet, not at
+            //the developed home sector the players happened to leave last
+            String startKey = startSectorKey();
+            if(startKey != null){
+                Home start = new Home();
+                start.sector = startKey;
+                SectorRunner.writeAtomic(tmp.child("home.json"), JsonIO.write(start));
+            }else{
+                copyIfExists(campaign.child("home.json"), tmp.child("home.json"));
+            }
+
             tmp.child("sectors").mkdirs();
             tmp.child("info").mkdirs();
 
@@ -1789,6 +1843,7 @@ public class Coordinator{
         Log.info("[mp-sectors] switching company @ -> @", company, safe);
         try{
             instances.stopAll();
+            kickHomePlayers();
             if(!saveHomeBlocking()) throw new IllegalStateException("не удалось сохранить домашний сектор");
             archiveCompany(company);
 
@@ -1847,6 +1902,41 @@ public class Coordinator{
         Log.info("[mp-sectors] company @ archived", name);
     }
 
+    /**
+     * A crash between moving campaign/ away and moving the replacement in leaves no active
+     * campaign. Recover the most complete copy on the next start instead of refusing to boot.
+     */
+    private void recoverCampaignSwap(){
+        Fi old = campaign.parent().child("campaign.old");
+        Fi tmp = campaign.parent().child("campaign.new");
+        Fi restore = campaign.parent().child("campaign.restore");
+
+        if(!hasSaves(campaign)){
+            Fi source = hasSaves(restore) ? restore : hasSaves(tmp) ? tmp : hasSaves(old) ? old : null;
+            if(source != null){
+                if(campaign.exists()) campaign.deleteDirectory();
+                source.moveTo(campaign);
+                Log.warn("[mp-sectors] recovered the campaign from @", source.name());
+            }
+        }
+
+        old.deleteDirectory();
+        tmp.deleteDirectory();
+        restore.deleteDirectory();
+    }
+
+    private static boolean hasSaves(Fi dir){
+        if(dir == null || !dir.exists()) return false;
+
+        Fi sectors = dir.child("sectors");
+        if(!sectors.exists()) return false;
+
+        for(Fi file : sectors.list()){
+            if(file.extension().equals("msav")) return true;
+        }
+        return false;
+    }
+
     private void swapCampaign(Fi tmp){
         synchronized(campaignLock){
             Fi old = campaign.parent().child("campaign.old");
@@ -1868,12 +1958,10 @@ public class Coordinator{
         if(requests.exists()) requests.deleteDirectory();
     }
 
-    private static void copyIfExists(Fi from, Fi to){
-        try{
-            if(from.exists()) SectorRunner.copy(from, to);
-        }catch(Throwable t){
-            Log.err("[mp-sectors] could not copy @", from.name(), t);
-        }
+    private static void copyIfExists(Fi from, Fi to) throws Exception{
+        //missing optional files are fine; a failed copy of an existing file must abort the
+        //company creation instead of silently starting it without research/moderators
+        if(from.exists()) SectorRunner.copy(from, to);
     }
 
     private boolean reloadHomeBlocking(){

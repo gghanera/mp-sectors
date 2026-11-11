@@ -249,6 +249,11 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   is damaged is recovered from its save instead of being regenerated.
 - **2.4.3 fix** (server 0.6.2): company archives are copied to a temporary folder first, so a
   failed archive no longer deletes the previous copy of that company.
+- **2.4.4 company fixes** (server 0.6.3): a new company starts at the planet's starting sector,
+  not at the last home; home players are disconnected and new connections blocked while the
+  campaign is swapped; a crash during the swap is recovered from `campaign.old/new/restore`;
+  company names cannot collide with temp folders or Windows device names; a failed copy of
+  research/moderators/bans aborts creation instead of silently losing them.
 
 ### Co-op tools (2.3.0)
 
@@ -389,7 +394,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.4.3     # dist\MP-Sectors-2.4.3.zip
+.\package.ps1 -Version 2.4.4     # dist\MP-Sectors-2.4.4.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of
