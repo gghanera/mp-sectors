@@ -1821,12 +1821,29 @@ public class Coordinator{
         }
     }
 
-    /** Copies the live campaign into companies/<name>, replacing the older archive. */
+    /** Copies the live campaign into companies/<name>, replacing the older archive atomically. */
     private void archiveCompany(String name) throws Exception{
         companiesDir.mkdirs();
         Fi target = companiesDir.child(name);
-        target.deleteDirectory();
-        SectorRunner.withCampaignLock(campaign, () -> copyTree(campaign, target));
+        Fi old = companiesDir.child("tmp-old-" + name);
+
+        //a previous archive may have been interrupted after moving the old copy away
+        if(!target.exists() && old.exists()) old.moveTo(target);
+        old.deleteDirectory();
+
+        Fi tmp = companiesDir.child("tmp-" + name);
+        tmp.deleteDirectory();
+        SectorRunner.withCampaignLock(campaign, () -> copyTree(campaign, tmp));
+
+        boolean hadOld = target.exists();
+        if(hadOld) target.moveTo(old);
+        try{
+            tmp.moveTo(target);
+        }catch(Throwable t){
+            if(hadOld && old.exists()) old.moveTo(target);
+            throw t;
+        }
+        old.deleteDirectory();
         Log.info("[mp-sectors] company @ archived", name);
     }
 
