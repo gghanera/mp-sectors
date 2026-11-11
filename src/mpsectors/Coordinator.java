@@ -2005,6 +2005,10 @@ public class Coordinator{
             Vars.state.rules.waves = true;
             Vars.state.rules.winWave = endlessWave;
         }
+        if(Vars.state != null){
+            //the tutorial save may have stopped its wave timer at the capture wave
+            Vars.state.wavetime = 0f;
+        }
 
         if(sector.info == null || (sector.info.waves && sector.info.winWave == endlessWave)) return;
 
