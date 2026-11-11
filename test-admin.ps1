@@ -23,7 +23,7 @@ function Fail($message){
 
 function Admin($body){
     return (Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:$HttpPort/admin" `
-        -ContentType 'application/json' -Body $body -TimeoutSec 40).Content | ConvertFrom-Json
+        -ContentType 'application/json' -Body $body -TimeoutSec 180).Content | ConvertFrom-Json
 }
 
 try{
@@ -92,6 +92,29 @@ try{
 
     $last = Admin '{"player":"TestMod","action":"modremove","name":"TestMod"}'
     if($last.ok){ Fail 'the last moderator was removed' }
+
+    #bans carry a reason and an expiry
+    $ban = Admin '{"player":"TestMod","action":"ban","name":"BannedGuy","reason":"test","hours":1}'
+    if(-not $ban.ok){ Fail 'ban with reason failed' }
+    $status = (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$HttpPort/status" -TimeoutSec 10).Content | ConvertFrom-Json
+    $entry = $status.bans | Where-Object { $_.name -eq 'BannedGuy' }
+    if($entry -eq $null -or $entry.reason -ne 'test' -or $entry.expires -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()){
+        Fail 'ban reason/expiry not stored'
+    }
+    if(-not (Admin '{"player":"TestMod","action":"unban","name":"BannedGuy"}').ok){ Fail 'unban failed' }
+
+    #named companies: archive the current one, start a fresh campaign with the same research
+    $create = Admin '{"player":"TestMod","action":"companycreate","value":"TestCompany"}'
+    if(-not $create.ok){ Fail ('company create failed: ' + $create.error) }
+    $status = (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$HttpPort/status" -TimeoutSec 10).Content | ConvertFrom-Json
+    if($status.company -ne 'TestCompany'){ Fail 'company name not switched after create' }
+    if(-not (Test-Path (Join-Path $root 'campaign\unlocks.json'))){ Fail 'new company lost its research file' }
+    if(-not (Test-Path (Join-Path $root 'companies\Основная'))){ Fail 'the old company was not archived' }
+
+    $back = Admin '{"player":"TestMod","action":"companyswitch","value":"Основная"}'
+    if(-not $back.ok){ Fail ('company switch failed: ' + $back.error) }
+    $status = (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$HttpPort/status" -TimeoutSec 10).Content | ConvertFrom-Json
+    if($status.company -ne 'Основная'){ Fail 'company did not switch back' }
 
     Write-Host 'PASS: admin endpoint checks' -ForegroundColor Green
 }finally{

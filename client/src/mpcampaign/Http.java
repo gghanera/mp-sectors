@@ -30,6 +30,55 @@ public class Http{
         request(url, "POST", body == null ? null : body.toString(), callback, 180000);
     }
 
+    /**
+     * Downloads a jar into target. If the running game keeps the file locked, the file is saved
+     * next to the data directory instead; the callback gets the saved path.
+     */
+    public static void download(String url, arc.files.Fi target, arc.func.Cons<String> callback){
+        Thread thread = new Thread(() -> {
+            String saved = null;
+            arc.files.Fi temp = target.parent().child(target.name() + ".part");
+            try{
+                HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(4000);
+                connection.setReadTimeout(180000);
+
+                if(connection.getResponseCode() != 200){
+                    throw new java.io.IOException("HTTP " + connection.getResponseCode());
+                }
+
+                temp.delete();
+                try(InputStream in = connection.getInputStream(); OutputStream out = temp.write(false)){
+                    in.transferTo(out);
+                }
+                connection.disconnect();
+
+                try{
+                    target.delete();
+                    temp.moveTo(target);
+                    saved = target.absolutePath();
+                }catch(Throwable locked){
+                    //the jar of the running mod may be locked on Windows
+                    arc.files.Fi fallback = Core.settings.getDataDirectory()
+                        .child("mp-campaign-updates").child(target.name());
+                    fallback.parent().mkdirs();
+                    fallback.delete();
+                    temp.moveTo(fallback);
+                    saved = fallback.absolutePath();
+                }
+            }catch(Throwable t){
+                Log.err("[mp-campaign] download @ failed", url);
+                temp.delete();
+            }
+
+            String path = saved;
+            Core.app.post(() -> callback.get(path));
+        }, "mp-campaign-download");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     private static void request(String url, String method, String body, Callback callback, int readTimeoutMs){
         Thread thread = new Thread(() -> {
             Jval result = null;

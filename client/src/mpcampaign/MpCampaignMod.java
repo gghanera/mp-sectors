@@ -80,6 +80,8 @@ public class MpCampaignMod extends Mod{
     public static boolean campaignMapOpen;
     public static String lastError = "";
     public static String serverVersion = "", campaignVersion = "";
+    public static String company = "";
+    public static String[] companies = {};
     public static String[] whoLines = {};
 
     private static boolean installed;
@@ -88,6 +90,7 @@ public class MpCampaignMod extends Mod{
     private static ServerDialog serverDialog;
     private static SnapshotDialog snapshotDialog;
     private static AdminDialog adminDialog;
+    private static ModsDialog modsDialog;
 
     //Time Control bridge: the mod only scales the client, so the speed is mirrored onto the server
     private static final String speedPacket = "mpcampaign-speed";
@@ -385,6 +388,11 @@ public class MpCampaignMod extends Mod{
         adminDialog.show();
     }
 
+    public static void openMods(){
+        if(modsDialog == null) modsDialog = new ModsDialog();
+        modsDialog.show();
+    }
+
     /** Creates a campaign snapshot now (button in the snapshot dialog and Ctrl+S). */
     public static void saveSnapshot(){
         Jval body = Jval.newObject();
@@ -496,6 +504,16 @@ public class MpCampaignMod extends Mod{
         paused = bool(root, "paused");
         serverVersion = str(root, "serverVersion");
         campaignVersion = str(root, "campaignVersion");
+        company = str(root, "company");
+
+        Jval companyList = root.get("companies");
+        if(companyList != null && companyList.isArray()){
+            companies = new String[companyList.asArray().size];
+            int i = 0;
+            for(Jval value : companyList.asArray()) companies[i++] = value.asString();
+        }else{
+            companies = new String[0];
+        }
 
         Jval who = root.get("who");
         if(who != null && who.isArray()){
@@ -1066,8 +1084,7 @@ public class MpCampaignMod extends Mod{
                         continue;
                     }
 
-                    String formatted = highlightMentions(message, localName());
-                    Vars.ui.chatfrag.addMessage("[orange][" + sectorLabel(sector) + "][white] " + player + ": [lightgray]" + formatted);
+                    Vars.ui.chatfrag.addMessage(chatLine(sectorLabel(sector), player, message));
                     if(mentions(message, localName())) mindustry.gen.Sounds.uiChat.play();
                 }
             }
@@ -1096,22 +1113,21 @@ public class MpCampaignMod extends Mod{
             && message.toLowerCase().contains("@" + name.toLowerCase());
     }
 
-    private static String highlightMentions(String message, String name){
-        if(name == null || name.isEmpty()) return message;
+    /** A cross-sector chat line; any @nick highlights the whole message. */
+    private static String chatLine(String sector, String player, String message){
+        String prefix = "[orange][" + sector + "][white] " + player + ":";
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+            .compile("@[\\p{L}\\p{N}_-]+").matcher(message);
+        if(!matcher.find()) return prefix + " [lightgray]" + message;
 
-        try{
-            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(?i)@" + java.util.regex.Pattern.quote(name));
-            java.util.regex.Matcher matcher = pattern.matcher(message);
-            StringBuffer out = new StringBuffer();
-            while(matcher.find()){
-                matcher.appendReplacement(out,
-                    java.util.regex.Matcher.quoteReplacement("[accent]" + matcher.group() + "[lightgray]"));
-            }
-            matcher.appendTail(out);
-            return out.toString();
-        }catch(Throwable t){
-            return message;
+        matcher.reset();
+        StringBuffer out = new StringBuffer();
+        while(matcher.find()){
+            matcher.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(
+                "[white]" + matcher.group() + "[accent]"));
         }
+        matcher.appendTail(out);
+        return "[accent]◆ " + prefix + " [accent]" + out;
     }
 
     // ---------------- json helpers ----------------

@@ -145,7 +145,8 @@ public class Coordinator{
 
     /** One moderator action from the in-game admin panel. */
     public static class AdminRequest{
-        public String player = "", action = "", sector = "", name = "", value = "";
+        public String player = "", action = "", sector = "", name = "", value = "", reason = "";
+        public long hours;
     }
 
     /** A pause/speed/kick command relayed from the coordinator to one sector instance. */
@@ -231,6 +232,12 @@ public class Coordinator{
     private final java.util.concurrent.ConcurrentHashMap<String, Boolean> validSnapshots = new java.util.concurrent.ConcurrentHashMap<>();
     private Fi historyFile, notesFile;
 
+    //named campaign save slots ("companies"): the active one is campaign/, the rest live here
+    private Fi companiesDir;
+    private Fi companyFile;
+    private volatile String company = "Основная";
+    private Fi modsDir;
+
     public Coordinator(Config config){
         this.config = config;
         this.campaign = Core.files.absolute(config.campaign);
@@ -248,6 +255,10 @@ public class Coordinator{
         stopFile.delete();
 
         ResearchServer.campaignPath = config.campaign;
+        companiesDir = campaign.parent().child("companies");
+        companyFile = companiesDir.child("current.txt");
+        company = readCompany();
+        modsDir = locateModsDir();
         try{
             if(config.serverJar == null || config.serverJar.isEmpty()){
                 Log.err("[mp-sectors] coordinator: serverJar is not set");
@@ -1162,8 +1173,14 @@ public class Coordinator{
                 if(Moderators.isModerator(req.name)){
                     return "{\"ok\":false,\"error\":\"Нельзя забанить модератора. Сначала снимите его.\"}";
                 }
-                ban(req.name, req.player);
+                ban(req.name, req.player, req.reason, Math.max(0, req.hours));
                 return "{\"ok\":true}";
+            }
+            case "companycreate" -> {
+                return companyCreate(req.value, req.player);
+            }
+            case "companyswitch" -> {
+                return companySwitch(req.value, req.player);
             }
             case "unban" -> {
                 if(req.name == null || req.name.isBlank()){
@@ -1174,10 +1191,12 @@ public class Coordinator{
             }
             case "bans" -> {
                 StringBuilder json = new StringBuilder("{\"ok\":true,\"bans\":[");
-                String[] bans = Bans.list();
+                Bans.BanEntry[] bans = Bans.entries();
                 for(int i = 0; i < bans.length; i++){
                     if(i > 0) json.append(',');
-                    json.append('"').append(esc(bans[i])).append('"');
+                    json.append("{\"name\":\"").append(esc(bans[i].name)).append("\",")
+                        .append("\"reason\":\"").append(esc(bans[i].reason)).append("\",")
+                        .append("\"expires\":").append(bans[i].expires).append('}');
                 }
                 return json.append("]}").toString();
             }
@@ -1617,10 +1636,20 @@ public class Coordinator{
 
     /** Adds a campaign-wide ban and kicks the player from the home and every instance. */
     public void ban(String name, String player){
+        ban(name, player, "", 0);
+    }
+
+    public void ban(String name, String player, String reason, long hours){
         if(name == null || name.isBlank()) return;
 
-        Bans.add(name);
-        addHistory("admin", "", player == null ? "" : player, "Бан: " + name);
+        String uuid = "";
+        Player local = Groups.player.find(p -> p.plainName().equalsIgnoreCase(name));
+        if(local != null && local.con != null) uuid = local.con.uuid;
+
+        long expires = hours > 0 ? System.currentTimeMillis() + hours * 60L * 60L * 1000L : 0;
+        Bans.add(name, uuid, reason, player, expires);
+        addHistory("admin", "", player == null ? "" : player, "Бан: " + name
+            + (reason == null || reason.isBlank() ? "" : " (" + reason + ")"));
         Core.app.post(() -> MpSectorsMod.adminBan(name));
         for(InstanceManager.Instance inst : instances.all()){
             if(inst.stopping) continue;
@@ -1636,15 +1665,208 @@ public class Coordinator{
     }
 
     public String[] banLines(){
-        String[] bans = Bans.list();
+        Bans.BanEntry[] bans = Bans.entries();
         if(bans.length == 0) return new String[]{"[lightgray]Банов нет."};
 
         String[] lines = new String[bans.length + 1];
         lines[0] = "[accent]Баны (" + bans.length + "):";
         for(int i = 0; i < bans.length; i++){
-            lines[i + 1] = "[white]" + bans[i];
+            Bans.BanEntry ban = bans[i];
+            lines[i + 1] = "[white]" + ban.name
+                + (ban.reason.isEmpty() ? "" : " [lightgray]— " + ban.reason)
+                + (ban.expires <= 0 ? "" : " [orange]до "
+                    + new SimpleDateFormat("dd.MM HH:mm").format(new Date(ban.expires)));
         }
         return lines;
+    }
+
+    // ---------------- companies (named campaign slots) ----------------
+
+    private String readCompany(){
+        try{
+            if(companyFile != null && companyFile.exists()){
+                String name = companyFile.readString().trim();
+                if(!name.isEmpty()) return name;
+            }
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not read companies/current.txt", t);
+        }
+        return "Основная";
+    }
+
+    private void writeCompany(String name){
+        try{
+            companiesDir.mkdirs();
+            SectorRunner.writeAtomic(companyFile, name);
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not write companies/current.txt", t);
+        }
+    }
+
+    private ArrayList<Fi> companies(){
+        ArrayList<Fi> out = new ArrayList<>();
+        if(companiesDir == null || !companiesDir.exists()) return out;
+
+        for(Fi dir : companiesDir.list()){
+            if(!dir.isDirectory() || dir.name().startsWith("tmp-")) continue;
+            if(dir.child("home.json").exists() || dir.child("sectors").exists()) out.add(dir);
+        }
+        out.sort(Comparator.comparing(Fi::name));
+        return out;
+    }
+
+    /** @return a filesystem-safe name, or null if the name is empty/invalid. */
+    private static String sanitizeCompany(String name){
+        if(name == null) return null;
+        String out = name.trim();
+        if(out.isEmpty() || out.length() > 40) return null;
+        if(!out.matches("[\\p{L}\\p{N} _-]+")) return null;
+        return out;
+    }
+
+    private String companyCreate(String name, String player){
+        if(restoring) return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
+
+        String safe = sanitizeCompany(name);
+        if(safe == null) return "{\"ok\":false,\"error\":\"Имя компании: буквы, цифры, пробел, _ и - (до 40).\"}";
+        if(safe.equalsIgnoreCase(company)) return "{\"ok\":false,\"error\":\"Эта компания уже активна.\"}";
+        if(companiesDir.child(safe).exists()) return "{\"ok\":false,\"error\":\"Компания с таким именем уже есть.\"}";
+
+        restoring = true;
+        Log.info("[mp-sectors] creating company @", safe);
+        try{
+            instances.stopAll();
+            saveHomeBlocking();
+            archiveCompany(company);
+
+            //a fresh campaign keeps research and the shared lists, but not sectors, chat or history
+            Fi tmp = campaign.parent().child("campaign.new");
+            tmp.deleteDirectory();
+            tmp.mkdirs();
+            copyIfExists(campaign.child("unlocks.json"), tmp.child("unlocks.json"));
+            copyIfExists(campaign.child("moderators.json"), tmp.child("moderators.json"));
+            copyIfExists(campaign.child("bans.json"), tmp.child("bans.json"));
+            copyIfExists(campaign.child("home.json"), tmp.child("home.json"));
+            tmp.child("sectors").mkdirs();
+            tmp.child("info").mkdirs();
+
+            swapCampaign(tmp);
+
+            company = safe;
+            writeCompany(safe);
+            if(!reloadHomeBlocking() || home == null || !home.loaded){
+                return "{\"ok\":false,\"error\":\"Компания создана, но домашний сектор не загрузился. Перезапустите координатор.\"}";
+            }
+            addHistory("admin", "", player == null ? "" : player, "Создана компания: " + safe);
+            Log.info("[mp-sectors] company @ created", safe);
+            return "{\"ok\":true}";
+        }catch(Throwable t){
+            restoring = false;
+            Log.err("[mp-sectors] could not create company @", safe, t);
+            return "{\"ok\":false,\"error\":\"Не удалось создать компанию: " + esc(String.valueOf(t.getMessage())) + "\"}";
+        }
+    }
+
+    private String companySwitch(String name, String player){
+        if(restoring) return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
+
+        String safe = sanitizeCompany(name);
+        if(safe == null) return "{\"ok\":false,\"error\":\"Некорректное имя компании.\"}";
+        if(safe.equalsIgnoreCase(company)) return "{\"ok\":true}";
+
+        Fi target = companiesDir.child(safe);
+        if(!target.exists()) return "{\"ok\":false,\"error\":\"Компания не найдена.\"}";
+
+        restoring = true;
+        Log.info("[mp-sectors] switching company @ -> @", company, safe);
+        try{
+            instances.stopAll();
+            saveHomeBlocking();
+            archiveCompany(company);
+
+            synchronized(campaignLock){
+                Fi old = campaign.parent().child("campaign.old");
+                old.deleteDirectory();
+                campaign.moveTo(old);
+                try{
+                    target.moveTo(campaign);
+                }catch(Throwable t){
+                    old.moveTo(campaign);
+                    throw t;
+                }
+                old.deleteDirectory();
+                deleteRequests();
+            }
+
+            company = safe;
+            writeCompany(safe);
+            if(!reloadHomeBlocking() || home == null || !home.loaded){
+                return "{\"ok\":false,\"error\":\"Компания переключена, но домашний сектор не загрузился. Перезапустите координатор.\"}";
+            }
+            addHistory("admin", "", player == null ? "" : player, "Компания: " + safe);
+            Log.info("[mp-sectors] company @ is active", safe);
+            return "{\"ok\":true}";
+        }catch(Throwable t){
+            restoring = false;
+            Log.err("[mp-sectors] could not switch to company @", safe, t);
+            return "{\"ok\":false,\"error\":\"Не удалось переключить компанию: " + esc(String.valueOf(t.getMessage())) + "\"}";
+        }
+    }
+
+    /** Copies the live campaign into companies/<name>, replacing the older archive. */
+    private void archiveCompany(String name) throws Exception{
+        companiesDir.mkdirs();
+        Fi target = companiesDir.child(name);
+        target.deleteDirectory();
+        copyTree(campaign, target);
+        Log.info("[mp-sectors] company @ archived", name);
+    }
+
+    private void swapCampaign(Fi tmp){
+        synchronized(campaignLock){
+            Fi old = campaign.parent().child("campaign.old");
+            old.deleteDirectory();
+            campaign.moveTo(old);
+            try{
+                tmp.moveTo(campaign);
+            }catch(Throwable t){
+                old.moveTo(campaign);
+                throw t;
+            }
+            old.deleteDirectory();
+            deleteRequests();
+        }
+    }
+
+    private void deleteRequests(){
+        Fi requests = campaign.child("requests");
+        if(requests.exists()) requests.deleteDirectory();
+    }
+
+    private static void copyIfExists(Fi from, Fi to){
+        try{
+            if(from.exists()) SectorRunner.copy(from, to);
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not copy @", from.name(), t);
+        }
+    }
+
+    private boolean reloadHomeBlocking(){
+        CountDownLatch latch = new CountDownLatch(1);
+        Core.app.post(() -> {
+            try{
+                reloadHome();
+            }finally{
+                latch.countDown();
+            }
+        });
+
+        try{
+            return latch.await(120, TimeUnit.SECONDS);
+        }catch(InterruptedException e){
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /** The home sector's core was destroyed: keep the save, mark it unowned, stop autosaving it. */
@@ -1696,6 +1918,8 @@ public class Coordinator{
         http.createContext("/history", ex -> respond(ex, handle(ex, this::historyJson)));
         http.createContext("/note", ex -> respond(ex, handle(ex, this::noteJson)));
         http.createContext("/admin", ex -> respond(ex, handle(ex, this::adminJson)));
+        http.createContext("/mods", ex -> respond(ex, handle(ex, this::modsJson)));
+        http.createContext("/download", this::downloadMod);
         httpExecutor = Executors.newFixedThreadPool(4);
         http.setExecutor(httpExecutor);
         http.start();
@@ -2161,11 +2385,25 @@ public class Coordinator{
             json.append('"').append(esc(moderators[i])).append('"');
         }
         json.append("],");
+        json.append("\"company\":\"").append(esc(company)).append("\",");
+        json.append("\"companies\":[");
+        ArrayList<Fi> slots = companies();
+        for(int i = 0; i < slots.size(); i++){
+            if(i > 0) json.append(',');
+            json.append("{\"name\":\"").append(esc(slots.get(i).name())).append("\",")
+                .append("\"time\":").append(slots.get(i).lastModified()).append('}');
+        }
+        json.append("],");
         json.append("\"bans\":[");
-        String[] bans = Bans.list();
+        Bans.BanEntry[] bans = Bans.entries();
         for(int i = 0; i < bans.length; i++){
             if(i > 0) json.append(',');
-            json.append('"').append(esc(bans[i])).append('"');
+            Bans.BanEntry ban = bans[i];
+            json.append("{\"name\":\"").append(esc(ban.name)).append("\",")
+                .append("\"reason\":\"").append(esc(ban.reason)).append("\",")
+                .append("\"by\":\"").append(esc(ban.by)).append("\",")
+                .append("\"created\":").append(ban.created).append(',')
+                .append("\"expires\":").append(ban.expires).append('}');
         }
         json.append("],");
         json.append("\"homePlayers\":[");
@@ -2204,6 +2442,80 @@ public class Coordinator{
         }
         json.append("]}");
         return json.toString();
+    }
+
+    // ---------------- client mod distribution ----------------
+
+    private static Fi locateModsDir(){
+        try{
+            if(Vars.mods != null){
+                var mod = Vars.mods.locateMod("mp-sectors");
+                if(mod != null && mod.file != null) return mod.file.parent();
+            }
+        }catch(Throwable ignored){
+        }
+        return Vars.modDirectory;
+    }
+
+    private String modsJson(HttpExchange ex){
+        StringBuilder json = new StringBuilder("{\"ok\":true,\"files\":[");
+        boolean first = true;
+        for(String name : new String[]{"mp-campaign.jar", "any-research.jar"}){
+            Fi file = modsDir == null ? null : modsDir.child(name);
+            if(file == null || !file.exists()) continue;
+
+            if(!first) json.append(',');
+            first = false;
+            String version = name.startsWith("mp-campaign") ? modVersion("mp-campaign") : modVersion("any-research");
+            json.append("{\"name\":\"").append(esc(name)).append("\",")
+                .append("\"size\":").append(file.length()).append(',')
+                .append("\"version\":\"").append(esc(version)).append("\"}");
+        }
+        return json.append("],\"campaignVersion\":\"").append(esc(modVersion("mp-campaign"))).append("\"}").toString();
+    }
+
+    private void downloadMod(HttpExchange ex){
+        Fi source = null;
+        try{
+            String name = query(ex, "file");
+            if(name != null && (name.equals("mp-campaign.jar") || name.equals("any-research.jar"))){
+                Fi candidate = modsDir == null ? null : modsDir.child(name);
+                if(candidate != null && candidate.exists()) source = candidate;
+            }
+
+            if(source == null){
+                respond(ex, "{\"ok\":false,\"error\":\"Файл не найден.\"}");
+                return;
+            }
+
+            byte[] bytes = source.readBytes();
+            ex.getResponseHeaders().set("Content-Type", "application/java-archive");
+            ex.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + source.name() + "\"");
+            ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            ex.sendResponseHeaders(200, bytes.length);
+            try(OutputStream out = ex.getResponseBody()){
+                out.write(bytes);
+            }
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not serve a mod download", t);
+        }finally{
+            ex.close();
+        }
+    }
+
+    private static String query(HttpExchange ex, String key){
+        String raw = ex.getRequestURI().getRawQuery();
+        if(raw == null || raw.isEmpty()) return null;
+
+        for(String part : raw.split("&")){
+            int split = part.indexOf('=');
+            if(split <= 0 || !part.substring(0, split).equals(key)) continue;
+            try{
+                return java.net.URLDecoder.decode(part.substring(split + 1), StandardCharsets.UTF_8);
+            }catch(Throwable ignored){
+            }
+        }
+        return null;
     }
 
     // ---------------- state ----------------

@@ -71,6 +71,8 @@ public class MpSectorsMod extends Mod{
     private static final String acceleratorAnimPacket = "mpcampaign-accelerator-anim";
     private static final float minSpeed = 0.25f, maxSpeed = 16f;
     private static float gameSpeed = 1f;
+    private static final java.util.regex.Pattern mentionPattern =
+        java.util.regex.Pattern.compile("@[\\p{L}\\p{N}_-]+");
 
     @Override
     public void init(){
@@ -78,8 +80,18 @@ public class MpSectorsMod extends Mod{
         Events.on(UnlockEvent.class, e -> writeUnlocksIfChanged());
         Events.on(PlayerConnect.class, e -> {
             String name = e.player.plainName();
-            if(Bans.isBanned(name)){
-                Log.info("[mp-sectors] banned player tried to join: @", name);
+            String uuid = e.player.con == null ? "" : e.player.con.uuid;
+            Bans.BanEntry ban = Bans.entry(name, uuid);
+            if(ban != null){
+                if(ban.uuid.isEmpty() && !uuid.isEmpty()) Bans.enrich(name, uuid);
+                Log.info("[mp-sectors] banned player tried to join: @ (@)", name,
+                    ban.reason.isEmpty() ? "без причины" : ban.reason);
+                if(!ban.reason.isEmpty()){
+                    try{
+                        e.player.sendMessage("[scarlet]Вы забанены. Причина: [white]" + ban.reason);
+                    }catch(Throwable ignored){
+                    }
+                }
                 e.player.kick(KickReason.banned);
                 return;
             }
@@ -248,7 +260,19 @@ public class MpSectorsMod extends Mod{
             }
         });
         handler.<Player>register("snapshot", "Создать снимок кампании (модераторы).", (args, player) -> snapshotCampaign(player));
-        handler.<Player>register("ban", "<name>", "Забанить игрока во всей кампании (модераторы).", (args, player) -> ban(player, args[0], true));
+        handler.<Player>register("ban", "<name> [hours] [reason...]", "Забанить игрока во всей кампании (модераторы); часы 0 — навсегда.", (args, player) -> {
+            long hours = 0;
+            String reason = "";
+            if(args.length > 1){
+                try{
+                    hours = Long.parseLong(args[1]);
+                    reason = join(args, 2);
+                }catch(NumberFormatException e){
+                    reason = join(args, 1);
+                }
+            }
+            ban(player, args[0], true, Math.max(0, hours), reason);
+        });
         handler.<Player>register("unban", "<name>", "Разбанить игрока во всей кампании (модераторы).", (args, player) -> ban(player, args[0], false));
         handler.<Player>register("bans", "Список банов кампании.", (args, player) -> listBans(player));
         handler.<Player>register("speed", "<x>", "Скорость игры: 4, 0.5 и т.д. (модераторы).", (args, player) -> {
@@ -418,7 +442,22 @@ public class MpSectorsMod extends Mod{
     }
 
     static void adminBan(String name){
-        adminKick(name, KickReason.banned);
+        if(name == null || name.isEmpty()) return;
+
+        Bans.BanEntry ban = Bans.entry(name);
+        for(Player player : Groups.player.copy()){
+            if(!player.plainName().equalsIgnoreCase(name)) continue;
+
+            if(ban != null && !ban.reason.isEmpty()){
+                try{
+                    player.sendMessage("[scarlet]Вы забанены. Причина: [white]" + ban.reason);
+                }catch(Throwable ignored){
+                }
+            }
+            player.kick(KickReason.banned);
+            Log.info("[mp-sectors] @ banned (@)", name, ban == null || ban.reason.isEmpty() ? "без причины" : ban.reason);
+            return;
+        }
     }
 
     private static String speedText(float speed){
@@ -503,6 +542,10 @@ public class MpSectorsMod extends Mod{
     }
 
     private void ban(@arc.util.Nullable Player player, String name, boolean banned){
+        ban(player, name, banned, 0, "");
+    }
+
+    private void ban(@arc.util.Nullable Player player, String name, boolean banned, long hours, String reason){
         if(player != null && !Moderators.isModerator(player.plainName())){
             player.sendMessage("[scarlet]Только модераторы могут управлять банами.");
             return;
@@ -512,22 +555,22 @@ public class MpSectorsMod extends Mod{
             return;
         }
         String target = name.trim();
+        String who = player == null ? "console" : player.plainName();
         if(banned && Moderators.isModerator(target)){
             reply(player, "[scarlet]Нельзя забанить модератора. Сначала снимите его через mpmod remove.");
             return;
         }
 
         if(coordinator != null){
-            if(banned) coordinator.ban(target, player == null ? "console" : player.plainName());
-            else coordinator.unban(target, player == null ? "console" : player.plainName());
+            if(banned) coordinator.ban(target, who, reason, hours);
+            else coordinator.unban(target, who);
             reply(player, banned ? "[accent]Забанен: " + target : "[accent]Разбанен: " + target);
             return;
         }
 
-        postAdmin(player, banned ? "ban" : "unban", target, null, 15000, ok -> {
+        postAdmin(player, banned ? "ban" : "unban", target, null, banned ? reason : null, hours, 15000, ok -> {
             if(ok){
                 if(banned){
-                    Bans.add(target);
                     adminBan(target);
                 }else{
                     Bans.remove(target);
@@ -539,17 +582,32 @@ public class MpSectorsMod extends Mod{
         });
     }
 
+    private static String join(String[] args, int from){
+        StringBuilder out = new StringBuilder();
+        for(int i = from; i < args.length; i++){
+            if(out.length() > 0) out.append(' ');
+            out.append(args[i]);
+        }
+        return out.toString();
+    }
+
     private void listBans(@arc.util.Nullable Player player){
         sendLines(player, coordinator != null ? coordinator.banLines() : localBanLines());
     }
 
     private static String[] localBanLines(){
-        String[] bans = Bans.list();
+        Bans.BanEntry[] bans = Bans.entries();
         if(bans.length == 0) return new String[]{"[lightgray]Банов нет."};
 
         String[] lines = new String[bans.length + 1];
         lines[0] = "[accent]Баны (" + bans.length + "):";
-        for(int i = 0; i < bans.length; i++) lines[i + 1] = "[white]" + bans[i];
+        for(int i = 0; i < bans.length; i++){
+            Bans.BanEntry ban = bans[i];
+            lines[i + 1] = "[white]" + ban.name
+                + (ban.reason.isEmpty() ? "" : " [lightgray]— " + ban.reason)
+                + (ban.expires <= 0 ? "" : " [orange]до "
+                    + new java.text.SimpleDateFormat("dd.MM HH:mm").format(new java.util.Date(ban.expires)));
+        }
         return lines;
     }
 
@@ -590,6 +648,11 @@ public class MpSectorsMod extends Mod{
     /** POST /admin from an instance; the callback runs on the game thread. */
     private void postAdmin(@arc.util.Nullable Player player, String action, String name, String value,
                            int timeoutMs, Cons<Boolean> done){
+        postAdmin(player, action, name, value, null, 0, timeoutMs, done);
+    }
+
+    private void postAdmin(@arc.util.Nullable Player player, String action, String name, String value,
+                           String reason, long hours, int timeoutMs, Cons<Boolean> done){
         if(chatPort <= 0){
             reply(player, "[scarlet]Это не сервер кампании.");
             if(done != null) Core.app.post(() -> done.get(false));
@@ -601,6 +664,10 @@ public class MpSectorsMod extends Mod{
             .append("\",\"action\":\"").append(Coordinator.esc(action)).append('"');
         if(name != null) body.append(",\"name\":\"").append(Coordinator.esc(name)).append('"');
         if(value != null) body.append(",\"value\":\"").append(Coordinator.esc(value)).append('"');
+        if(reason != null && !reason.isEmpty()){
+            body.append(",\"reason\":\"").append(Coordinator.esc(reason)).append('"');
+        }
+        if(hours > 0) body.append(",\"hours\":").append(hours);
         body.append('}');
         String json = body.toString();
 
@@ -668,6 +735,7 @@ public class MpSectorsMod extends Mod{
         if(Vars.netServer != null){
             Vars.netServer.addPacketHandler(speedPacket, this::handleSpeedPacket);
             Vars.netServer.addPacketHandler(acceleratorPacket, this::handleAcceleratorPacket);
+            Vars.netServer.chatFormatter = MpSectorsMod::formatChat;
         }
 
         Fi coordFile = Vars.dataDirectory.child("mp-coordinator.json");
@@ -805,6 +873,26 @@ public class MpSectorsMod extends Mod{
         }catch(Throwable t){
             Log.err("[mp-sectors] failed to load the sector", t);
         }
+    }
+
+    /** Chat formatter: a message with @nick is shown as one highlighted line. */
+    private static String formatChat(Player sender, String message){
+        if(message == null) message = "";
+        if(sender == null) return message;
+
+        String prefix = "[coral][[" + sender.coloredName() + "[coral]]:";
+        if(!mentionPattern.matcher(message).find()){
+            return prefix + "[white] " + message;
+        }
+
+        java.util.regex.Matcher matcher = mentionPattern.matcher(message);
+        StringBuffer out = new StringBuffer();
+        while(matcher.find()){
+            matcher.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(
+                "[white]" + matcher.group() + "[accent]"));
+        }
+        matcher.appendTail(out);
+        return "[accent]◆ " + prefix + "[accent] " + out;
     }
 
     private void update(){
@@ -986,7 +1074,8 @@ public class MpSectorsMod extends Mod{
                             case "kick" -> adminKick(req.value);
                             case "limit" -> adminKick(req.value, KickReason.playerLimit);
                             case "ban" -> {
-                                Bans.add(req.value);
+                                Player local = Groups.player.find(p -> p.plainName().equalsIgnoreCase(req.value));
+                                if(local != null && local.con != null) Bans.enrich(req.value, local.con.uuid);
                                 adminBan(req.value);
                             }
                             case "cargo" -> runner.addCargo(req.value);

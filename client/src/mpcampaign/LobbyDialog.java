@@ -215,6 +215,7 @@ public class LobbyDialog extends PlanetDialog{
             row.defaults().height(36f).padRight(6f);
             row.button("Кто где", Icon.players, this::showWho).width(120f);
             row.button("События", Icon.list, this::showHistory).width(120f);
+            row.button("Моды", Icon.download, MpCampaignMod::openMods).width(100f);
             if(MpCampaignMod.isModerator()){
                 row.button("Админка", Icon.admin, MpCampaignMod::openAdmin).width(120f);
             }
@@ -293,7 +294,7 @@ public class LobbyDialog extends PlanetDialog{
         String homeName = homeName();
         String version = MpCampaignMod.versionMismatch()
             ? "[scarlet]Обнови mp-campaign: сервер " + MpCampaignMod.campaignVersion
-                + ", у тебя " + MpCampaignMod.localVersion() + "[]\n"
+                + ", у тебя " + MpCampaignMod.localVersion() + " — кнопка «Моды»[]\n"
             : "";
 
         return version + (MpCampaignMod.paused ? "[scarlet]ПАУЗА  []" : "")

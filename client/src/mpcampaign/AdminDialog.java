@@ -116,6 +116,38 @@ public class AdminDialog extends BaseDialog{
             t.button("x4", () -> post("speed", null, null, "4")).width(70f);
         }).left().row();
 
+        // ---- companies ----
+        body.add().height(8f).row();
+        body.add("[accent]Компании").left().row();
+        body.add("[lightgray]активная: [white]" + (MpCampaignMod.company.isEmpty()
+            ? "Основная" : MpCampaignMod.company) + "[]").left().row();
+
+        Table companyList = new Table();
+        companyList.top().left();
+        body.add(companyList).growX().left().row();
+
+        if(MpCampaignMod.companies.length == 0){
+            companyList.add("[lightgray]Сохранённых компаний пока нет.").left().row();
+        }else{
+            for(String name : MpCampaignMod.companies){
+                if(name == null || name.isEmpty()) continue;
+                if(name.equalsIgnoreCase(MpCampaignMod.company)) continue;
+
+                Table row = new Table();
+                row.left();
+                row.add("[white]" + name + "[]").width(300f).wrap().left();
+                row.button("Переключить", Icon.refresh, () -> confirmCompanySwitch(name)).size(170f, 40f);
+                companyList.add(row).growX().left().padBottom(2f).row();
+            }
+        }
+
+        String[] newCompany = {""};
+        companyList.table(row -> {
+            row.left();
+            row.field("", value -> newCompany[0] = value).width(280f).height(44f);
+            row.button("Новая", Icon.add, () -> confirmCompanyCreate(newCompany[0])).size(140f, 44f).padLeft(6f);
+        }).left().row();
+
         // ---- sectors ----
         body.add().height(8f).row();
         body.add("[accent]Секторы").left().row();
@@ -201,28 +233,57 @@ public class AdminDialog extends BaseDialog{
         Jval bans = status.get("bans");
         if(bans != null && bans.isArray() && !bans.asArray().isEmpty()){
             for(Jval value : bans.asArray()){
-                String name = value.asString();
+                String name = value.isString() ? value.asString() : MpCampaignMod.str(value, "name");
                 if(name == null || name.isEmpty()) continue;
+
+                String reason = value.isString() ? "" : MpCampaignMod.str(value, "reason");
+                long expires = value.isString() ? 0 : MpCampaignMod.numLong(value, "expires", 0);
 
                 Table row = new Table();
                 row.left();
-                row.add("[white]" + name + "[]").width(280f).wrap().left();
-                row.button("Разбанить", Icon.cancel, () -> post("unban", null, name, null)).size(150f, 40f);
+                row.add("[white]" + name + "[]").width(150f).wrap().left();
+                row.add("[lightgray]" + (reason.isEmpty() ? "без причины" : reason) + "[]")
+                    .width(160f).wrap().left();
+                row.add(expires <= 0 ? "[lightgray]навсегда[]"
+                    : "[orange]до " + formatTime(expires) + "[]").width(125f).left();
+                row.button("Разбанить", Icon.cancel, () -> post("unban", null, name, null)).size(135f, 40f);
                 banList.add(row).growX().left().padBottom(2f).row();
             }
         }else{
             banList.add("[lightgray]Банов нет.").left().row();
         }
 
-        String[] addedBan = {""};
-        banList.table(row -> {
-            row.left();
-            row.field("", value -> addedBan[0] = value).width(280f).height(44f);
-            row.button("Забанить", Icon.cancel, () -> {
-                String name = addedBan[0] == null ? "" : addedBan[0].trim();
-                if(!name.isEmpty()) post("ban", null, name, null);
-            }).size(150f, 44f).padLeft(6f);
-        }).left().row();
+        banList.button("Забанить...", Icon.cancel, this::showBanDialog).size(190f, 44f).left().row();
+    }
+
+    private void showBanDialog(){
+        BaseDialog dialog = new BaseDialog("Забанить игрока");
+        String[] name = {""}, reason = {""}, hours = {"0"};
+
+        dialog.cont.table(t -> {
+            t.left();
+            t.add("[lightgray]Ник").left().width(120f);
+            t.field("", value -> name[0] = value).width(320f).height(44f).row();
+            t.add("[lightgray]Причина").left().width(120f);
+            t.field("", value -> reason[0] = value).width(320f).height(44f).row();
+            t.add("[lightgray]Часов (0 — навсегда)").left().width(280f);
+            t.field("0", value -> hours[0] = value).width(120f).height(44f).row();
+        }).left();
+
+        dialog.buttons.button("Забанить", Icon.cancel, () -> {
+            String target = name[0] == null ? "" : name[0].trim();
+            if(target.isEmpty()) return;
+
+            long until = 0;
+            try{
+                until = Math.max(0, Long.parseLong(hours[0].trim()));
+            }catch(Throwable ignored){
+            }
+            post("ban", null, target, null, reason[0] == null ? "" : reason[0].trim(), until);
+            dialog.hide();
+        }).size(160f, 46f);
+        dialog.buttons.button("Отмена", dialog::hide).size(140f, 46f);
+        dialog.show();
     }
 
     private static String formatDuration(long ms){
@@ -301,12 +362,18 @@ public class AdminDialog extends BaseDialog{
     }
 
     private void post(String action, String sector, String name, String value){
+        post(action, sector, name, value, null, 0);
+    }
+
+    private void post(String action, String sector, String name, String value, String reason, long hours){
         Jval body = Jval.newObject();
         body.add("player", MpCampaignMod.localName());
         body.add("action", action);
         if(sector != null) body.add("sector", sector);
         if(name != null) body.add("name", name);
         if(value != null) body.add("value", value);
+        if(reason != null && !reason.isEmpty()) body.add("reason", reason);
+        if(hours > 0) body.add("hours", Jval.valueOf(hours));
 
         Http.post(MpCampaignMod.url() + "/admin", body, json -> {
             if(json != null && MpCampaignMod.bool(json, "ok")){
@@ -333,6 +400,24 @@ public class AdminDialog extends BaseDialog{
     private void confirmKick(String sector, String name){
         Vars.ui.showConfirm("Кикнуть игрока?", name + " будет отключён от сервера.",
             () -> post("kick", sector, name, null));
+    }
+
+    private void confirmCompanySwitch(String name){
+        Vars.ui.showConfirm("Переключить компанию?",
+            "Текущая компания сохранится. Все секторы будут остановлены, затем загрузится «" + name + "».",
+            () -> post("companyswitch", null, null, name));
+    }
+
+    private void confirmCompanyCreate(String name){
+        String target = name == null ? "" : name.trim();
+        if(target.isEmpty()){
+            Vars.ui.showInfoFade("[scarlet]Введите имя компании.");
+            return;
+        }
+        Vars.ui.showConfirm("Создать компанию?",
+            "Текущая компания сохранится в архиве. Новая начнётся с чистыми секторами, но с текущими "
+                + "исследованиями, модераторами и банами.",
+            () -> post("companycreate", null, null, target));
     }
 
     private void confirmRemoveModerator(String name){

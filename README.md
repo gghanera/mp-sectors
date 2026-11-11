@@ -224,6 +224,23 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   sectors until `/resumeall`; returning to the home lobby is still allowed.
 - **Two windows on one PC** for testing: duplicate clients are allowed by default.
 
+### Campaigns, bans, mentions and mod updates (2.4.0)
+
+- **Mentions**: `@nick` in chat highlights the whole message (and plays a sound when it is your
+  nick) in every sector.
+- **Proper bans**: reason, duration and author. `/ban <name> [hours] [reason...]`
+  (`0` hours = forever); the admin panel has a «Забанить...» dialog with reason and duration
+  and shows the expiry. Expired bans stop applying automatically.
+- **Companies**: named campaign slots in the admin panel. «Новая» archives the current
+  campaign and starts a clean one (fresh sectors, same research, moderators and bans);
+  «Переключить» archives the current company and loads the selected one. Archives live in
+  `companies\<name>`; the active one stays in `campaign/`.
+- **Mod distribution**: the map's «Моды» button downloads the coordinator's current
+  `mp-campaign.jar` and `any-research.jar`. If the running game locks the jar, it is saved to
+  `%APPDATA%\Mindustry\mp-campaign-updates` with instructions to replace it manually.
+- **API**: `/mods`, `/download?file=...`; `/status` adds `company`, `companies` and bans as
+  objects (`name`, `reason`, `by`, `created`, `expires`).
+
 ### Co-op tools (2.3.0)
 
 - **Campaign notifications**: landing, capture, loss, attack and «attack repelled» are written
@@ -322,7 +339,7 @@ Back up `campaign/` — it is the whole campaign.
 | `/speedall <x>` | Speed of the whole campaign (moderators) |
 | `/snapshot` | Create a campaign snapshot (moderators) |
 | `/who` | Who is in which sector |
-| `/ban <name>`, `/unban <name>`, `/bans` | Campaign-wide bans (moderators) |
+| `/ban <name> [hours] [reason...]`, `/unban <name>`, `/bans` | Campaign-wide bans with an optional duration and reason (moderators) |
 | `/abandon` | Abandon sector (moderators) |
 | `/anyresearch ...` | Client half of Any Research |
 
@@ -363,7 +380,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.3.0     # dist\MP-Sectors-2.3.0.zip
+.\package.ps1 -Version 2.4.0     # dist\MP-Sectors-2.4.0.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of
