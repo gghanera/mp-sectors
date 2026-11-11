@@ -240,6 +240,8 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   `%APPDATA%\Mindustry\mp-campaign-updates` with instructions to replace it manually.
 - **API**: `/mods`, `/download?file=...`; `/status` adds `company`, `companies` and bans as
   objects (`name`, `reason`, `by`, `created`, `expires`).
+- **2.4.1 fix**: the client crashed after creating a company because `companies` is an array of
+  objects, not strings. The client now reads both forms; the server is unchanged (0.6.0).
 
 ### Co-op tools (2.3.0)
 
@@ -380,7 +382,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.4.0     # dist\MP-Sectors-2.4.0.zip
+.\package.ps1 -Version 2.4.1     # dist\MP-Sectors-2.4.1.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

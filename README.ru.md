@@ -38,7 +38,7 @@ MP-Sectors/
 Steam-сборка Mindustry портативная: данные лежат не в `%APPDATA%`, а в
 `...\steamapps\common\Mindustry\saves\`.
 
-- моды: `...\saves\mods\` — `mp-campaign.jar` (2.4.0) и `any-research.jar`;
+- моды: `...\saves\mods\` — `mp-campaign.jar` (2.4.1) и `any-research.jar`;
 - кампания: `...\saves\saves\` и `...\saves\settings.bin`.
 
 Кампания из Steam переносится в `campaign/` (87 секторов Serpulo/Erekir, исследования и
@@ -291,6 +291,8 @@ handshake (сервер видит TCP-подключение, но не пол�
   файл сохраняется в `%APPDATA%\Mindustry\mp-campaign-updates` с просьбой заменить вручную.
 - **API** — `/mods` (список файлов и версий), `/download?file=...`; `/status` теперь отдаёт
   `company`, `companies` и баны объектами (`name`, `reason`, `by`, `created`, `expires`).
+- **Исправление 2.4.1** — клиент падал после создания компании: `companies` — массив объектов,
+  а не строк. Теперь клиент читает оба варианта; сервер не менялся (0.6.0).
 
 ### Новое в 2.3.0
 
@@ -437,7 +439,7 @@ cd ..\any-research
 Собрать архив для игроков (моды + скрипты + документация):
 
 ```powershell
-.\package.ps1 -Version 2.4.0     # dist\MP-Sectors-2.4.0.zip
+.\package.ps1 -Version 2.4.1     # dist\MP-Sectors-2.4.1.zip
 ```
 
 Проверить админ-API (запускает временный координатор на копии кампании):

@@ -31,3 +31,6 @@
 *.msav
 Thumbs.db
 desktop.ini
+
+# Active campaigns and archives (personal save data)
+/companies/

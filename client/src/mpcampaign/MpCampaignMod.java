@@ -510,7 +510,10 @@ public class MpCampaignMod extends Mod{
         if(companyList != null && companyList.isArray()){
             companies = new String[companyList.asArray().size];
             int i = 0;
-            for(Jval value : companyList.asArray()) companies[i++] = value.asString();
+            for(Jval value : companyList.asArray()){
+                //the coordinator sends objects {name,time}; strings are kept for older servers
+                companies[i++] = value.isString() ? value.asString() : str(value, "name");
+            }
         }else{
             companies = new String[0];
         }
@@ -1134,7 +1137,8 @@ public class MpCampaignMod extends Mod{
 
     static String str(Jval value, String key){
         Jval out = value == null ? null : value.get(key);
-        return out == null || out.isNull() ? "" : out.asString();
+        //a mismatched object/array must not crash the client (Jval.asString throws)
+        return out == null || out.isNull() || out.isObject() || out.isArray() ? "" : out.asString();
     }
 
     static int num(Jval value, String key, int def){
