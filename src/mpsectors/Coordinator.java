@@ -2484,7 +2484,12 @@ public class Coordinator{
             }
 
             if(source == null){
-                respond(ex, "{\"ok\":false,\"error\":\"Файл не найден.\"}");
+                byte[] message = "{\"ok\":false,\"error\":\"Файл не найден.\"}".getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+                ex.sendResponseHeaders(404, message.length);
+                try(OutputStream out = ex.getResponseBody()){
+                    out.write(message);
+                }
                 return;
             }
 

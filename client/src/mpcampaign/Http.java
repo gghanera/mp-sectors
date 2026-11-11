@@ -54,6 +54,11 @@ public class Http{
                 }
                 connection.disconnect();
 
+                //a JSON error page must never be saved as a mod jar
+                try(InputStream check = temp.read()){
+                    if(check.read() != 'P' || check.read() != 'K') throw new java.io.IOException("not a jar");
+                }
+
                 try{
                     target.delete();
                     temp.moveTo(target);
