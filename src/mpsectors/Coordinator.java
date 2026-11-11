@@ -422,7 +422,10 @@ public class Coordinator{
                 if(dir.exists()) dir.deleteDirectory();
 
                 Fi tmp = snapshotsDir.child("tmp-" + dir.name());
-                SectorRunner.withCampaignLock(campaign, () -> copyTree(campaign, tmp));
+                SectorRunner.withCampaignLock(campaign, () -> {
+                    copyTree(campaign, tmp);
+                    SectorRunner.writeAtomic(tmp.child("company.txt"), company);
+                });
                 tmp.moveTo(dir);
 
                 pruneSnapshots();
@@ -433,7 +436,10 @@ public class Coordinator{
                 if(!daily.exists()){
                     Fi dailyTmp = dailyDir.child("tmp-" + today);
                     dailyTmp.deleteDirectory();
-                    SectorRunner.withCampaignLock(campaign, () -> copyTree(campaign, dailyTmp));
+                    SectorRunner.withCampaignLock(campaign, () -> {
+                        copyTree(campaign, dailyTmp);
+                        SectorRunner.writeAtomic(dailyTmp.child("company.txt"), company);
+                    });
                     dailyTmp.moveTo(daily);
                     pruneDaily();
                     Log.info("[mp-sectors] daily snapshot @ created", today);
@@ -456,9 +462,11 @@ public class Coordinator{
         boolean first = true;
 
         for(Fi dir : snapshots()){
+            if(!snapshotCompany(dir).equalsIgnoreCase(company)) continue;
             first = appendSnapshot(json, dir, false, first);
         }
         for(Fi dir : dailySnapshots()){
+            if(!snapshotCompany(dir).equalsIgnoreCase(company)) continue;
             first = appendSnapshot(json, dir, true, first);
         }
 
@@ -479,6 +487,7 @@ public class Coordinator{
             .append("\"size\":").append(dirSize(dir)).append(',')
             .append("\"daily\":").append(daily).append(',')
             .append("\"beforeRestore\":").append(dir.name().startsWith("before-restore_")).append(',')
+            .append("\"company\":\"").append(esc(snapshotCompany(dir))).append("\",")
             .append("\"comment\":\"").append(esc(comment)).append("\",")
             .append("\"valid\":").append(validSnapshotCached(dir)).append('}');
         return false;
@@ -581,6 +590,9 @@ public class Coordinator{
 
         Fi dir = findSnapshot(req.name);
         if(dir == null) return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+        if(!snapshotCompany(dir).equalsIgnoreCase(company)){
+            return "{\"ok\":false,\"error\":\"Этот снимок относится к другой компании.\"}";
+        }
         if(!validSnapshot(dir)) return "{\"ok\":false,\"error\":\"Снимок повреждён.\"}";
 
         Fi srcSave = dir.child("sectors").child(req.sector + ".msav");
@@ -631,6 +643,9 @@ public class Coordinator{
         if(dir == null){
             return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
         }
+        if(!snapshotCompany(dir).equalsIgnoreCase(company)){
+            return "{\"ok\":false,\"error\":\"Этот снимок относится к другой компании.\"}";
+        }
         if(!validSnapshot(dir)){
             return "{\"ok\":false,\"error\":\"Снимок повреждён: в нём нет читаемых сохранений секторов.\"}";
         }
@@ -641,6 +656,7 @@ public class Coordinator{
 
         try{
             //instances save their sectors on stop; the snapshot is copied over them afterwards
+            instances.freeze();
             instances.stopAll();
             kickHomePlayers();
 
@@ -699,6 +715,8 @@ public class Coordinator{
             restoring = false;
             Log.err("[mp-sectors] could not restore the campaign", t);
             return "{\"ok\":false,\"error\":\"Ошибка восстановления: " + esc(String.valueOf(t.getMessage())) + "\"}";
+        }finally{
+            instances.unfreeze();
         }
     }
 
@@ -765,6 +783,10 @@ public class Coordinator{
             loadHistory();
             loadChat();
             captured.clear();
+            attackState.clear();
+            chatRate.clear();
+            chatText.clear();
+            chatTextTime.clear();
 
             //the restored campaign may have different moderators/bans than the live lists
             Moderators.init(campaign);
@@ -943,6 +965,19 @@ public class Coordinator{
 
     private static String snapshotName(){
         return new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date());
+    }
+
+    /** Snapshots created before companies existed belong to the original company. */
+    private static String snapshotCompany(Fi dir){
+        try{
+            Fi file = dir.child("company.txt");
+            if(file.exists()){
+                String name = file.readString().trim();
+                if(!name.isEmpty()) return name;
+            }
+        }catch(Throwable ignored){
+        }
+        return "Основная";
     }
 
     /** The folder mtime changes when snapshots are moved between disks; the name is stable. */
@@ -1765,6 +1800,13 @@ public class Coordinator{
         return out;
     }
 
+    /** Switching to a company with a different moderator list must not lock the requester out. */
+    private static void ensureRequesterModerator(String player){
+        if(player == null || player.isBlank() || Moderators.isModerator(player)) return;
+        Moderators.add(player);
+        Log.info("[mp-sectors] added @ as a moderator of the new company", player);
+    }
+
     /** The campaign planet's vanilla start sector (Serpulo-170, Erekir-10, ...). */
     private String startSectorKey(){
         Planet planet = null;
@@ -1787,6 +1829,7 @@ public class Coordinator{
         restoring = true;
         Log.info("[mp-sectors] creating company @", safe);
         try{
+            instances.freeze();
             instances.stopAll();
             kickHomePlayers();
             if(!saveHomeBlocking()) throw new IllegalStateException("не удалось сохранить домашний сектор");
@@ -1821,6 +1864,7 @@ public class Coordinator{
             if(!reloadHomeBlocking() || home == null || !home.loaded){
                 return "{\"ok\":false,\"error\":\"Компания создана, но домашний сектор не загрузился. Перезапустите координатор.\"}";
             }
+            ensureRequesterModerator(player);
             addHistory("admin", "", player == null ? "" : player, "Создана компания: " + safe);
             Log.info("[mp-sectors] company @ created", safe);
             return "{\"ok\":true}";
@@ -1828,6 +1872,8 @@ public class Coordinator{
             restoring = false;
             Log.err("[mp-sectors] could not create company @", safe, t);
             return "{\"ok\":false,\"error\":\"Не удалось создать компанию: " + esc(String.valueOf(t.getMessage())) + "\"}";
+        }finally{
+            instances.unfreeze();
         }
     }
 
@@ -1846,6 +1892,7 @@ public class Coordinator{
         restoring = true;
         Log.info("[mp-sectors] switching company @ -> @", company, safe);
         try{
+            instances.freeze();
             instances.stopAll();
             kickHomePlayers();
             if(!saveHomeBlocking()) throw new IllegalStateException("не удалось сохранить домашний сектор");
@@ -1870,6 +1917,7 @@ public class Coordinator{
             if(!reloadHomeBlocking() || home == null || !home.loaded){
                 return "{\"ok\":false,\"error\":\"Компания переключена, но домашний сектор не загрузился. Перезапустите координатор.\"}";
             }
+            ensureRequesterModerator(player);
             addHistory("admin", "", player == null ? "" : player, "Компания: " + safe);
             Log.info("[mp-sectors] company @ is active", safe);
             return "{\"ok\":true}";
@@ -1877,6 +1925,8 @@ public class Coordinator{
             restoring = false;
             Log.err("[mp-sectors] could not switch to company @", safe, t);
             return "{\"ok\":false,\"error\":\"Не удалось переключить компанию: " + esc(String.valueOf(t.getMessage())) + "\"}";
+        }finally{
+            instances.unfreeze();
         }
     }
 

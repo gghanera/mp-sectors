@@ -63,6 +63,8 @@ public class InstanceManager{
     private final Seq<Instance> instances = new Seq<>();
     private final ObjectMap<String, long[]> crashCounts = new ObjectMap<>();
     private long lastTick;
+    /** Set while the coordinator swaps campaigns; no instance may start in that window. */
+    private volatile boolean frozen;
 
     public InstanceManager(Coordinator.Config config, Cons<String> notify){
         this.config = config;
@@ -71,6 +73,14 @@ public class InstanceManager{
 
     public synchronized Seq<Instance> all(){
         return instances.copy();
+    }
+
+    public synchronized void freeze(){
+        frozen = true;
+    }
+
+    public synchronized void unfreeze(){
+        frozen = false;
     }
 
     public synchronized Instance get(String sector){
@@ -109,6 +119,7 @@ public class InstanceManager{
 
     public Instance start(String sector, String loadout, String resources){
         Instance out;
+        if(frozen) return null;
 
         //a sector being stopped lingers in the list until its process exits; wait instead
         //of handing a dying instance to a player who lands during the stop
@@ -136,6 +147,7 @@ public class InstanceManager{
             synchronized(this){
                 Instance existing = get(sector);
                 if(existing != null) return existing;
+                if(frozen) return null;
 
                 Fi dir = Core.files.local("instances").child(sector);
                 Fi mods = dir.child("config/mods");

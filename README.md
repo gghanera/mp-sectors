@@ -261,6 +261,9 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   after being captured.
 - **2.4.7** (server 0.6.6): the start sector's wave timer is reset on load, so the next wave
   starts immediately instead of waiting for a stale tutorial timer.
+- **2.4.8 company-switch fixes** (server 0.6.7): snapshots are tagged with their company and
+  hidden/rejected across companies; landing is frozen while a company is swapped; the moderator
+  who switches cannot be locked out by the target's moderator list.
 
 ### Co-op tools (2.3.0)
 
@@ -401,7 +404,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.4.7     # dist\MP-Sectors-2.4.7.zip
+.\package.ps1 -Version 2.4.8     # dist\MP-Sectors-2.4.8.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of
