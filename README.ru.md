@@ -38,7 +38,7 @@ MP-Sectors/
 Steam-сборка Mindustry портативная: данные лежат не в `%APPDATA%`, а в
 `...\steamapps\common\Mindustry\saves\`.
 
-- моды: `...\saves\mods\` — `mp-campaign.jar` (2.2.2) и `any-research.jar`;
+- моды: `...\saves\mods\` — `mp-campaign.jar` (2.2.3) и `any-research.jar`;
 - кампания: `...\saves\saves\` и `...\saves\settings.bin`.
 
 Кампания из Steam переносится в `campaign/` (87 секторов Serpulo/Erekir, исследования и
@@ -404,7 +404,7 @@ cd ..\any-research
 Собрать архив для игроков (моды + скрипты + документация):
 
 ```powershell
-.\package.ps1 -Version 2.2.2     # dist\MP-Sectors-2.2.2.zip
+.\package.ps1 -Version 2.2.3     # dist\MP-Sectors-2.2.3.zip
 ```
 
 Проверить админ-API (запускает временный координатор на копии кампании):

@@ -989,6 +989,7 @@ public class MpSectorsMod extends Mod{
                                 Bans.add(req.value);
                                 adminBan(req.value);
                             }
+                            case "cargo" -> runner.addCargo(req.value);
                             default -> adminCommand(req.action, req.value);
                         }
                         file.delete();

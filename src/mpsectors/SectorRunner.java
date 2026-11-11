@@ -240,6 +240,17 @@ public class SectorRunner{
         Log.info("[mp-sectors] launch cost @ taken from @", cost, sectorName);
     }
 
+    /** Delivers accelerator cargo to a sector that already had a base (its save ignores the loadout). */
+    public void addCargo(String items){
+        if(items == null || items.isEmpty()) return;
+
+        var core = Vars.state.rules.defaultTeam.core();
+        if(core == null) return;
+
+        parseItems(items).each((item, amount) -> core.items.add(item, amount));
+        Log.info("[mp-sectors] accelerator cargo delivered to @: @", sectorName, items);
+    }
+
     /** Consumes the interplanetary accelerator: every stored item, battery power and progress. */
     public void consumeAccelerator(int x, int y){
         var build = Vars.world.build(x, y);

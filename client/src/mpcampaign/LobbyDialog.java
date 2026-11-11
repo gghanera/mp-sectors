@@ -1,9 +1,11 @@
 package mpcampaign;
 
 import arc.Core;
+import arc.func.Cons;
 import arc.input.KeyCode;
 import arc.scene.event.InputEvent;
 import arc.scene.event.InputListener;
+import arc.struct.Seq;
 import arc.graphics.Color;
 import arc.scene.event.Touchable;
 import arc.scene.ui.Dialog;
@@ -40,6 +42,7 @@ public class LobbyDialog extends PlanetDialog{
     private Table top, bottom;
     private boolean guest;
     private boolean forceCampaign;
+    private boolean acceleratorMode;
 
     public LobbyDialog(){
         //vanilla behaviour: sectors that are not open yet cannot even be selected
@@ -117,9 +120,25 @@ public class LobbyDialog extends PlanetDialog{
         return this;
     }
 
+    /**
+     * The accelerator map: the campaign already has bases on the target planet, and vanilla
+     * planetLaunch refuses base sectors. Allow any sector while this map is open.
+     */
+    @Override
+    public void showPlanetLaunch(mindustry.type.Sector sector, Seq<Planet> launchCandidates, Cons<mindustry.type.Sector> listener){
+        acceleratorMode = true;
+        debugSelect = true;
+        super.showPlanetLaunch(sector, launchCandidates, listener);
+    }
+
     @Override
     public void hide(){
         MpCampaignMod.campaignMapOpen = false;
+
+        if(acceleratorMode){
+            acceleratorMode = false;
+            debugSelect = false;
+        }
 
         if(guest){
             debugSelect = false;

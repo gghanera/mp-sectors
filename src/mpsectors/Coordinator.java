@@ -1806,6 +1806,14 @@ public class Coordinator{
             out.steamHost = waitSteamHost();
             out.steamId = SteamSupport.steamId();
             consumeLanding(req);
+
+            //an accelerator can also target an owned sector; its save ignores the loadout
+            if(req.accelerator && req.resources != null && !req.resources.isEmpty()){
+                String items = req.resources;
+                Core.app.post(() -> {
+                    if(home != null && home.loaded) home.addCargo(items);
+                });
+            }
             return landJson(out);
         }
 
@@ -1850,6 +1858,11 @@ public class Coordinator{
 
         //consume the launch source even when the target sector was already running
         consumeLanding(req);
+
+        //target already has a base: its save ignores the launch loadout, so deliver the cargo
+        if(req.accelerator && req.resources != null && !req.resources.isEmpty() && snap.hasBase.get(key, false)){
+            command(inst.sector, "cargo", req.resources);
+        }
 
         if(config.steam){
             for(int i = 0; i < 40 && inst.steamHost.isEmpty(); i++){

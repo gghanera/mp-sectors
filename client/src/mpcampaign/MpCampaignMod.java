@@ -13,6 +13,7 @@ import arc.scene.event.Touchable;
 import arc.scene.ui.TextButton;
 import arc.scene.ui.layout.Table;
 import arc.struct.ObjectMap;
+import arc.struct.Seq;
 import arc.struct.StringMap;
 import arc.util.Log;
 import arc.util.Time;
@@ -824,7 +825,12 @@ public class MpCampaignMod extends Mod{
         //the accelerator map must use the coordinator's sector data, not the local campaign
         refresh(() -> {
             if(Vars.ui.planet != null){
-                Vars.ui.planet.showPlanetLaunch(from, null, target -> startAccelerator(build, from, target));
+                //Planet.launchCandidates is empty in this game build; build the same list the
+                //campaign map uses, otherwise Erekir cannot be selected at all
+                Seq<Planet> candidates = Vars.content.planets().select(planet ->
+                    !planet.removed && ((planet.alwaysUnlocked && planet.isLandable())
+                        || planet.sectors.contains(Sector::hasBase)));
+                Vars.ui.planet.showPlanetLaunch(from, candidates, target -> startAccelerator(build, from, target));
             }
         });
     }
