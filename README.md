@@ -264,6 +264,8 @@ The HTTP API still has no token, so the panel is meant for a trusted network
 - **2.4.8 company-switch fixes** (server 0.6.7): snapshots are tagged with their company and
   hidden/rejected across companies; landing is frozen while a company is swapped; the moderator
   who switches cannot be locked out by the target's moderator list.
+- **2.4.9** (server 0.6.8): snapshot/daily pruning is per company, so another company's
+  activity can no longer delete this company's backups.
 
 ### Co-op tools (2.3.0)
 
@@ -404,7 +406,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.4.8     # dist\MP-Sectors-2.4.8.zip
+.\package.ps1 -Version 2.4.9     # dist\MP-Sectors-2.4.9.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

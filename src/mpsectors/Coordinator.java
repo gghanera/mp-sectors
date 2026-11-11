@@ -868,22 +868,41 @@ public class Coordinator{
     }
 
     private void pruneSnapshots(){
-        ArrayList<Fi> list = snapshots();
-        while(list.size() > maxSnapshots){
-            Fi oldest = list.remove(list.size() - 1);
-            oldest.deleteDirectory();
-            validSnapshots.remove(oldest.name());
-            Log.info("[mp-sectors] removed old snapshot @", oldest.name());
+        //keep the limit per company: another company's snapshots must not evict this one's
+        ObjectMap<String, ArrayList<Fi>> groups = new ObjectMap<>();
+        for(Fi dir : snapshots()){
+            String owner = snapshotCompany(dir);
+            ArrayList<Fi> list = groups.get(owner);
+            if(list == null) groups.put(owner, list = new ArrayList<>());
+            list.add(dir);
+        }
+
+        for(ArrayList<Fi> list : groups.values()){
+            while(list.size() > maxSnapshots){
+                Fi oldest = list.remove(list.size() - 1);
+                oldest.deleteDirectory();
+                validSnapshots.remove(oldest.name());
+                Log.info("[mp-sectors] removed old snapshot @", oldest.name());
+            }
         }
     }
 
     private void pruneDaily(){
-        ArrayList<Fi> list = dailySnapshots();
-        while(list.size() > maxDailySnapshots){
-            Fi oldest = list.remove(list.size() - 1);
-            oldest.deleteDirectory();
-            validSnapshots.remove(oldest.name());
-            Log.info("[mp-sectors] removed old daily snapshot @", oldest.name());
+        ObjectMap<String, ArrayList<Fi>> groups = new ObjectMap<>();
+        for(Fi dir : dailySnapshots()){
+            String owner = snapshotCompany(dir);
+            ArrayList<Fi> list = groups.get(owner);
+            if(list == null) groups.put(owner, list = new ArrayList<>());
+            list.add(dir);
+        }
+
+        for(ArrayList<Fi> list : groups.values()){
+            while(list.size() > maxDailySnapshots){
+                Fi oldest = list.remove(list.size() - 1);
+                oldest.deleteDirectory();
+                validSnapshots.remove(oldest.name());
+                Log.info("[mp-sectors] removed old daily snapshot @", oldest.name());
+            }
         }
     }
 
