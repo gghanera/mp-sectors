@@ -77,7 +77,19 @@ public class MpSectorsMod extends Mod{
     @Override
     public void init(){
         Events.on(ServerLoadEvent.class, e -> start());
-        Events.on(UnlockEvent.class, e -> writeUnlocksIfChanged());
+        Events.on(UnlockEvent.class, e -> {
+            if(e.content == null) return;
+
+            //items/liquids are unlocked by core contents, buildings and old saves; they are not
+            //research. The research UI writes them explicitly through ResearchServer.
+            if(e.content instanceof mindustry.type.Item || e.content instanceof mindustry.type.Liquid) return;
+
+            //the campaign save writes state.rules.researched, not the global content flag
+            if(Vars.state != null && Vars.state.rules != null){
+                Vars.state.rules.researched.add(e.content);
+            }
+            addUnlockIfChanged(e.content.name);
+        });
         Events.on(PlayerConnect.class, e -> {
             String name = e.player.plainName();
             String uuid = e.player.con == null ? "" : e.player.con.uuid;
@@ -962,12 +974,16 @@ public class MpSectorsMod extends Mod{
         return runner == null ? null : runner.unlocksFile;
     }
 
-    /** Called on every UnlockEvent: merge this unlock into the campaign file right away. */
-    private void writeUnlocksIfChanged(){
+    /** Adds one researched content name to the campaign file. */
+    private void addUnlockIfChanged(String name){
+        //SaveIO.load fires UnlockEvent for research stored in the sector save; that save may be
+        //from another campaign or an old snapshot and must not overwrite unlocks.json
+        if(SectorRunner.suppressUnlockWrites) return;
+
         Fi file = unlocksFile();
         if(file == null) return;
 
-        SectorRunner.writeUnlocks(file);
+        SectorRunner.addUnlock(file, name);
         lastUnlocksModified = file.file().lastModified();
     }
 

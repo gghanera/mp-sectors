@@ -420,7 +420,7 @@ public class Coordinator{
                 if(dir.exists()) dir.deleteDirectory();
 
                 Fi tmp = snapshotsDir.child("tmp-" + dir.name());
-                copyTree(campaign, tmp);
+                SectorRunner.withCampaignLock(campaign, () -> copyTree(campaign, tmp));
                 tmp.moveTo(dir);
 
                 pruneSnapshots();
@@ -431,7 +431,7 @@ public class Coordinator{
                 if(!daily.exists()){
                     Fi dailyTmp = dailyDir.child("tmp-" + today);
                     dailyTmp.deleteDirectory();
-                    copyTree(campaign, dailyTmp);
+                    SectorRunner.withCampaignLock(campaign, () -> copyTree(campaign, dailyTmp));
                     dailyTmp.moveTo(daily);
                     pruneDaily();
                     Log.info("[mp-sectors] daily snapshot @ created", today);
@@ -595,8 +595,10 @@ public class Coordinator{
             takeSnapshot("before-restore_");
 
             synchronized(campaignLock){
-                SectorRunner.copy(srcSave, campaign.child("sectors").child(req.sector + ".msav"));
-                SectorRunner.copy(srcInfo, campaign.child("info").child(req.sector + ".json"));
+                SectorRunner.withCampaignLock(campaign, () -> {
+                    SectorRunner.copy(srcSave, campaign.child("sectors").child(req.sector + ".msav"));
+                    SectorRunner.copy(srcInfo, campaign.child("info").child(req.sector + ".json"));
+                });
             }
 
             addHistory("restore-sector", req.sector, req.player, "Сектор восстановлен из " + req.name);
@@ -640,7 +642,10 @@ public class Coordinator{
             instances.stopAll();
 
             //the home autosaves on a timer, so its last minute would be lost by a rollback
-            saveHomeBlocking();
+            if(!saveHomeBlocking()){
+                restoring = false;
+                return "{\"ok\":false,\"error\":\"Не удалось сохранить домашний сектор перед восстановлением.\"}";
+            }
 
             //a rollback can itself be wrong; keep the state we are about to leave behind
             takeSnapshot("before-restore_");
@@ -695,8 +700,8 @@ public class Coordinator{
     }
 
     /** Saves the home on the game thread; restore runs on an HTTP thread, so waiting is safe. */
-    private void saveHomeBlocking(){
-        if(home == null || !home.loaded) return;
+    private boolean saveHomeBlocking(){
+        if(home == null || !home.loaded) return true;
 
         CountDownLatch latch = new CountDownLatch(1);
         Core.app.post(() -> {
@@ -708,9 +713,10 @@ public class Coordinator{
         });
 
         try{
-            latch.await(15, TimeUnit.SECONDS);
+            return latch.await(15, TimeUnit.SECONDS);
         }catch(InterruptedException e){
             Thread.currentThread().interrupt();
+            return false;
         }
     }
 
@@ -941,6 +947,8 @@ public class Coordinator{
         if(src.isDirectory()){
             dst.mkdirs();
             for(Fi child : src.list()){
+                //a lock file is held by the writer and temp files are half-written by definition
+                if(child.name().endsWith(".lock") || child.name().endsWith(".tmp")) continue;
                 copyTree(child, dst.child(child.name()));
             }
         }else{
@@ -1736,7 +1744,7 @@ public class Coordinator{
         Log.info("[mp-sectors] creating company @", safe);
         try{
             instances.stopAll();
-            saveHomeBlocking();
+            if(!saveHomeBlocking()) throw new IllegalStateException("не удалось сохранить домашний сектор");
             archiveCompany(company);
 
             //a fresh campaign keeps research and the shared lists, but not sectors, chat or history
@@ -1781,7 +1789,7 @@ public class Coordinator{
         Log.info("[mp-sectors] switching company @ -> @", company, safe);
         try{
             instances.stopAll();
-            saveHomeBlocking();
+            if(!saveHomeBlocking()) throw new IllegalStateException("не удалось сохранить домашний сектор");
             archiveCompany(company);
 
             synchronized(campaignLock){
@@ -1818,7 +1826,7 @@ public class Coordinator{
         companiesDir.mkdirs();
         Fi target = companiesDir.child(name);
         target.deleteDirectory();
-        copyTree(campaign, target);
+        SectorRunner.withCampaignLock(campaign, () -> copyTree(campaign, target));
         Log.info("[mp-sectors] company @ archived", name);
     }
 
@@ -2052,7 +2060,12 @@ public class Coordinator{
                     .append("\"players\":").append(players);
 
                 if(info != null){
-                    json.append(",\"info\":\"").append(esc(JsonIO.write(info))).append('"');
+                    try{
+                        json.append(",\"info\":\"").append(esc(JsonIO.write(info))).append('"');
+                    }catch(Throwable t){
+                        //one bad sector must not break the whole map
+                        Log.err("[mp-sectors] could not serialize sector info for @", key, t);
+                    }
                 }
                 json.append('}');
             }

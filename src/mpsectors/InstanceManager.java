@@ -360,13 +360,18 @@ public class InstanceManager{
             inst = get(sector);
             if(inst == null) return;
 
-            //mark and remove before waiting: otherwise the watchdog would restart the process
+            //keep the instance in the list while it saves and exits: start() must wait for it,
+            //otherwise a landing could spawn a second process for the same sector and both
+            //would overwrite the same save
             inst.stopping = true;
-            instances.remove(inst);
         }
 
         //wait outside the manager lock: the coordinator's game thread must keep ticking
         stop(inst);
+
+        synchronized(this){
+            instances.remove(inst);
+        }
     }
 
     /** Stops in the background, so the HTTP/admin thread never waits for a process. */
@@ -399,12 +404,17 @@ public class InstanceManager{
         Seq<Instance> copy;
         synchronized(this){
             copy = instances.copy();
-            instances.clear();
+            for(Instance inst : copy) inst.stopping = true;
         }
 
-        //wait outside the lock: the coordinator's game thread must keep running meanwhile
+        //wait outside the lock: the coordinator's game thread must keep running meanwhile.
+        //the instances stay in the list while stopping so a concurrent landing waits for them.
         for(Instance inst : copy){
             stop(inst);
+        }
+
+        synchronized(this){
+            for(Instance inst : copy) instances.remove(inst);
         }
     }
 

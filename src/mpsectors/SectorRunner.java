@@ -39,6 +39,9 @@ import mindustry.world.blocks.storage.CoreBlock;
 public class SectorRunner{
 
     private static java.lang.reflect.Field unlockedField;
+    private static final Object unlocksLock = new Object();
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantLock>
+        campaignLocks = new java.util.concurrent.ConcurrentHashMap<>();
 
     public final String sectorName, planetName;
     public final int sectorId;
@@ -46,6 +49,8 @@ public class SectorRunner{
 
     public volatile boolean loaded;
     public String loadout = "", resources = "";
+    /** While a save is being loaded, its research must not be written back to the campaign file. */
+    public static volatile boolean suppressUnlockWrites;
     private float lastImportTotal;
 
     public SectorRunner(String campaignPath, String sector){
@@ -80,15 +85,20 @@ public class SectorRunner{
             return false;
         }
 
+        boolean previousSuppress = suppressUnlockWrites;
+        suppressUnlockWrites = true;
+
         try{
             boolean hasSave = campaignSave.exists();
 
             //Campaign metadata must be loaded BEFORE SaveIO.load: its SaveLoadEvent calls
             //SectorInfo.write(), which copies info.items into the core. Instances have a fresh
             //settings.bin, so without this the core would be cleared to an empty info.
+            boolean infoUsable = false;
             if(campaignInfo.exists()){
                 try{
                     sector.info = JsonIO.read(SectorInfo.class, campaignInfo.readString());
+                    infoUsable = true;
                 }catch(Throwable t){
                     Log.err("[mp-sectors] could not read sector info", t);
                 }
@@ -98,13 +108,24 @@ public class SectorRunner{
             //loaded here) must be generated again with the client's launch loadout
             boolean fromSave = hasSave && sector.info.hasCore;
 
+            //metadata may be lost (crash between the save and info write, a bad copy, a manual
+            //cleanup). The save itself is still valid; load it once and rebuild the metadata
+            //instead of regenerating the sector and overwriting the player's base.
+            boolean recovered = false;
+            if(hasSave && !fromSave && !infoUsable){
+                recovered = recoverFromSave();
+                fromSave = recovered;
+            }
+
             //a lost sector still has a save with the old buildings' plans (the B key ghosts);
             //read them before regenerating so the base can be rebuilt
             Seq<mindustry.game.Teams.BlockPlan> lostPlans = (hasSave && !fromSave) ? readLostPlans() : null;
 
             if(fromSave){
-                copy(campaignSave, localSave);
-                SaveIO.load(localSave);
+                if(!recovered){
+                    copy(campaignSave, localSave);
+                    SaveIO.load(localSave);
+                }
 
                 //a save without a sector is a built-in map that a broken instance rotated into
                 if(Vars.state.teams.playerCores().isEmpty() || Vars.state.rules.sector == null){
@@ -142,14 +163,18 @@ public class SectorRunner{
 
                 SaveIO.save(localSave);
 
-                //publish the generated save at once: the first autosave may be a minute away,
-                //and a crash before it would leave info.hasCore set with no campaign save
-                copy(localSave, campaignSave);
+                //publish the generated save and its info as one unit: a snapshot must not catch
+                //a new save next to the old (or missing) metadata
+                withCampaignLock(campaignSave.parent().parent(), () -> {
+                    //publish the generated save at once: the first autosave may be a minute away,
+                    //and a crash before it would leave info.hasCore set with no campaign save
+                    copy(localSave, campaignSave);
 
-                //SaveIO updated sector.info from the freshly placed core; publish it so the map
-                //immediately knows this sector has a base again
-                campaignInfo.parent().mkdirs();
-                writeAtomic(campaignInfo, JsonIO.write(sector.info));
+                    //SaveIO updated sector.info from the freshly placed core; publish it so the map
+                    //immediately knows this sector has a base again
+                    campaignInfo.parent().mkdirs();
+                    writeAtomic(campaignInfo, JsonIO.write(sector.info));
+                });
                 Log.info("[mp-sectors] generated a new sector @", sectorName);
             }
 
@@ -176,6 +201,20 @@ public class SectorRunner{
                 Vars.state.set(GameState.State.playing);
             }
 
+            if(fromSave){
+                //the save is the source of truth for core contents; rebuild the campaign info
+                //so a crash between the save and its info write is repaired on the next load
+                withCampaignLock(campaignInfo.parent().parent(), () -> {
+                    try{
+                        sector.info.prepare(sector);
+                        campaignInfo.parent().mkdirs();
+                        writeAtomic(campaignInfo, JsonIO.write(sector.info));
+                    }catch(Throwable t){
+                        Log.err("[mp-sectors] could not refresh sector info for @", sectorName, t);
+                    }
+                });
+            }
+
             refreshImportRates();
             applyUnlocks();
             loaded = true;
@@ -183,6 +222,30 @@ public class SectorRunner{
         }catch(Throwable t){
             Log.err("[mp-sectors] failed to load sector @", sectorName);
             Log.err(t);
+            return false;
+        }finally{
+            suppressUnlockWrites = previousSuppress;
+        }
+    }
+
+    /**
+     * Loads the save just to see whether it still has a player core. Used when the sector info is
+     * missing or unreadable: without this a perfectly good save would be regenerated and lost.
+     */
+    private boolean recoverFromSave(){
+        try{
+            copy(campaignSave, localSave);
+            SaveIO.load(localSave);
+
+            Sector sector = sector();
+            if(sector == null || Vars.state.teams.playerCores().isEmpty() || Vars.state.rules.sector == null){
+                return false;
+            }
+
+            Log.info("[mp-sectors] recovered sector info for @ from its save", sectorName);
+            return true;
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not recover sector info for @", sectorName, t);
             return false;
         }
     }
@@ -329,12 +392,14 @@ public class SectorRunner{
 
         sector.info.hasCore = false;
         sector.info.items.clear();
-        try{
-            campaignInfo.parent().mkdirs();
-            writeAtomic(campaignInfo, JsonIO.write(sector.info));
-        }catch(Throwable t){
-            Log.err("[mp-sectors] could not update sector info for @", sectorName, t);
-        }
+        withCampaignLock(campaignInfo.parent().parent(), () -> {
+            try{
+                campaignInfo.parent().mkdirs();
+                writeAtomic(campaignInfo, JsonIO.write(sector.info));
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not update sector info for @", sectorName, t);
+            }
+        });
     }
 
     /** Marks a won sector as captured: it keeps its core and stops counting as attacked. */
@@ -346,47 +411,76 @@ public class SectorRunner{
         sector.info.waves = false;
         sector.info.attack = false;
         sector.info.wasCaptured = true;
-        try{
-            campaignInfo.parent().mkdirs();
-            writeAtomic(campaignInfo, JsonIO.write(sector.info));
-        }catch(Throwable t){
-            Log.err("[mp-sectors] could not mark sector @ as captured", sectorName, t);
-        }
+        withCampaignLock(campaignInfo.parent().parent(), () -> {
+            try{
+                campaignInfo.parent().mkdirs();
+                writeAtomic(campaignInfo, JsonIO.write(sector.info));
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not mark sector @ as captured", sectorName, t);
+            }
+        });
     }
 
     public synchronized void save(){
         if(!loaded) return;
 
+        Sector sector = sector();
+        if(sector == null) return;
+
         try{
+            //write the process-local save first; campaign files stay untouched until it is complete
             SaveIO.save(localSave);
-            copy(localSave, campaignSave);
-            campaignInfo.parent().mkdirs();
-            writeAtomic(campaignInfo, JsonIO.write(sector().info));
-            writeUnlocks();
-            Log.info("[mp-sectors] saved sector @.", sectorName);
+
+            withCampaignLock(campaignSave.parent().parent(), () -> {
+                try{
+                    copy(localSave, campaignSave);
+                    campaignInfo.parent().mkdirs();
+                    writeAtomic(campaignInfo, JsonIO.write(sector.info));
+                    Log.info("[mp-sectors] saved sector @.", sectorName);
+                }catch(Throwable t){
+                    Log.err("[mp-sectors] save failed for @", sectorName, t);
+                }
+            });
         }catch(Throwable t){
             Log.err("[mp-sectors] save failed for @", sectorName, t);
         }
     }
 
-    /** Campaign research lives in local settings, which a fresh server instance does not have. */
+    /**
+     * Campaign research lives in unlocks.json. The file is authoritative once it exists: a sector
+     * save may contain research from another campaign (an imported save, a sector-specific rollback
+     * to an old snapshot), and merging that back would silently unlock the whole tech tree.
+     */
     public void applyUnlocks(){
         ObjectSet<String> names = new ObjectSet<>();
+        boolean fileExists = unlocksFile.exists();
 
-        if(unlocksFile.exists()){
+        if(fileExists){
             try{
                 String[] stored = JsonIO.read(String[].class, unlocksFile.readString());
                 if(stored != null){
-                    for(String name : stored) names.add(name);
+                    for(String name : stored){
+                        if(name != null) names.add(name);
+                    }
                 }
             }catch(Throwable t){
                 Log.err("[mp-sectors] could not read unlocks.json", t);
             }
-        }
-
-        if(Vars.state.rules != null){
+        }else if(Vars.state.rules != null){
+            //a brand-new campaign: adopt the starting sector's research once
             for(UnlockableContent content : Vars.state.rules.researched){
                 names.add(content.name);
+            }
+        }
+
+        //the save may still list research this campaign does not have. Items and liquids present
+        //in an old save's core/buildings stay usable in that sector, but must not unlock tech.
+        if(Vars.state.rules != null){
+            for(UnlockableContent content : Vars.state.rules.researched.copy()){
+                boolean resource = content instanceof Item || content instanceof mindustry.type.Liquid;
+                if(!resource && !content.alwaysUnlocked && !names.contains(content.name)){
+                    Vars.state.rules.researched.remove(content);
+                }
             }
         }
 
@@ -400,6 +494,10 @@ public class SectorRunner{
                 unlocked++;
             }
         }
+
+        //seed the file for a fresh campaign; write exactly the adopted set, not every content
+        //flag that happened to be unlocked in this process
+        if(!fileExists) writeUnlocks(unlocksFile, names);
 
         StringBuilder dbg = new StringBuilder();
         for(String name : names) dbg.append(name).append(' ');
@@ -460,63 +558,122 @@ public class SectorRunner{
         }
     }
 
-    public void writeUnlocks(){
-        writeUnlocks(unlocksFile);
-    }
-
-    /**
-     * Writes the union of this process's unlocks and whatever is already in the campaign file.
-     * Merging (instead of overwriting) is what keeps live research from several instances from
-     * being lost, and the sorted output keeps the file byte-stable when nothing changed.
-     */
-    public static void writeUnlocks(Fi file){
+    /** Writes exactly this set, without merging in unrelated content flags. */
+    public static void writeUnlocks(Fi file, ObjectSet<String> names){
         if(file == null) return;
 
-        try{
-            String json = unlocksJson(file);
-            String old = file.exists() ? file.readString().trim() : "";
-            if(!old.equals(json)){
+        synchronized(unlocksLock){
+            try{
                 file.parent().mkdirs();
-                writeAtomic(file, json);
+                java.nio.file.Path lockPath = file.parent().child(file.name() + ".lock").file().toPath();
+                try(java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(lockPath,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.WRITE);
+                    java.nio.channels.FileLock ignored = channel.lock()){
+
+                    String json = unlocksJson(names);
+                    String old = file.exists() ? file.readString().trim() : "";
+                    if(!old.equals(json)) writeAtomic(file, json);
+                }
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not seed unlocks.json", t);
             }
-        }catch(Throwable t){
-            Log.err("[mp-sectors] could not write unlocks.json", t);
         }
     }
 
-    public static String unlocksJson(Fi file){
-        Seq<String> names = new Seq<>();
+    /** Adds one researched content name; used by the research UI and non-item unlock events. */
+    public static void addUnlock(Fi file, String name){
+        if(file == null || name == null || name.isBlank()) return;
 
-        if(file != null && file.exists()){
+        synchronized(unlocksLock){
             try{
-                String[] stored = JsonIO.read(String[].class, file.readString());
-                if(stored != null){
-                    for(String name : stored){
-                        if(name != null && !names.contains(name)) names.add(name);
-                    }
+                file.parent().mkdirs();
+                java.nio.file.Path lockPath = file.parent().child(file.name() + ".lock").file().toPath();
+                try(java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(lockPath,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.WRITE);
+                    java.nio.channels.FileLock ignored = channel.lock()){
+
+                    ObjectSet<String> names = readUnlocks(file);
+                    if(names.contains(name)) return;
+
+                    names.add(name);
+                    String json = unlocksJson(names);
+                    String old = file.exists() ? file.readString().trim() : "";
+                    if(!old.equals(json)) writeAtomic(file, json);
                 }
             }catch(Throwable t){
-                Log.err("[mp-sectors] could not read unlocks.json", t);
+                Log.err("[mp-sectors] could not add an unlock to unlocks.json", t);
             }
         }
+    }
 
-        for(ContentType type : ContentType.all){
-            for(Content content : Vars.content.getBy(type)){
-                if(content instanceof UnlockableContent u && u.unlocked() && !u.alwaysUnlocked && !names.contains(u.name)){
-                    names.add(u.name);
+    private static ObjectSet<String> readUnlocks(Fi file){
+        ObjectSet<String> names = new ObjectSet<>();
+        if(file == null || !file.exists()) return names;
+
+        try{
+            String[] stored = JsonIO.read(String[].class, file.readString());
+            if(stored != null){
+                for(String name : stored){
+                    if(name != null) names.add(name);
                 }
             }
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not read unlocks.json", t);
         }
+        return names;
+    }
 
-        names.sort();
+    private static String unlocksJson(ObjectSet<String> set){
+        java.util.ArrayList<String> names = new java.util.ArrayList<>();
+        for(String name : set){
+            if(name != null && !names.contains(name)) names.add(name);
+        }
+        names.sort(String::compareTo);
 
         StringBuilder out = new StringBuilder("[");
-        for(int i = 0; i < names.size; i++){
+        for(int i = 0; i < names.size(); i++){
             if(i > 0) out.append(',');
             out.append('"').append(names.get(i)).append('"');
         }
-        out.append(']');
-        return out.toString();
+        return out.append(']').toString();
+    }
+
+    /**
+     * Serializes campaign file updates (a sector save + its info) against snapshots and company
+     * archives. Without this a snapshot can copy a new .msav next to the old info (or the reverse)
+     * and a restore then shows stale or missing bases. The lock is cross-process: every sector
+     * instance and the coordinator use the same campaign folder.
+     */
+    public static void withCampaignLock(Fi campaignRoot, Runnable action){
+        if(campaignRoot == null){
+            action.run();
+            return;
+        }
+
+        String key = campaignRoot.absolutePath();
+        java.util.concurrent.locks.ReentrantLock local = campaignLocks.computeIfAbsent(
+            key, ignored -> new java.util.concurrent.locks.ReentrantLock());
+        local.lock();
+
+        try{
+            campaignRoot.mkdirs();
+            java.nio.file.Path lockPath = campaignRoot.child(".save.lock").file().toPath();
+
+            try(java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(lockPath,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
+                java.nio.channels.FileLock ignored = channel.lock()){
+
+                action.run();
+            }catch(java.io.IOException lockFailed){
+                //do not lose a save just because the lock file cannot be opened
+                Log.err("[mp-sectors] campaign lock unavailable, writing without it", lockFailed);
+                action.run();
+            }
+        }finally{
+            local.unlock();
+        }
     }
 
     public static void copy(Fi from, Fi to){

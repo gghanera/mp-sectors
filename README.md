@@ -242,6 +242,11 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   objects (`name`, `reason`, `by`, `created`, `expires`).
 - **2.4.1 fix**: the client crashed after creating a company because `companies` is an array of
   objects, not strings. The client now reads both forms; the server is unchanged (0.6.0).
+- **2.4.2 save fixes** (server 0.6.1): a campaign-wide save lock keeps snapshots from copying a
+  new `.msav` next to old sector info; research updates are serialized and no longer overwrite
+  each other; stopping a sector waits for its save before a new instance may start; loading an
+  old sector no longer pours its items/blocks into the campaign's research; a sector whose info
+  is damaged is recovered from its save instead of being regenerated.
 
 ### Co-op tools (2.3.0)
 
@@ -382,7 +387,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.4.1     # dist\MP-Sectors-2.4.1.zip
+.\package.ps1 -Version 2.4.2     # dist\MP-Sectors-2.4.2.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

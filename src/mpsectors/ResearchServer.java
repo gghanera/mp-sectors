@@ -95,6 +95,13 @@ public class ResearchServer{
 
         content.unlock();
         if(Vars.state.rules != null) Vars.state.rules.researched.add(content);
+
+        //items/liquids do not fire a persisted UnlockEvent (old saves unlock them implicitly),
+        //so the research action writes the campaign file itself
+        if(campaignPath != null){
+            SectorRunner.addUnlock(Core.files.absolute(campaignPath).child("unlocks.json"), content.name);
+        }
+
         reply(player, "[accent]Исследовано: [white]" + label(content)
             + (spent.isEmpty() ? "" : " [lightgray](потрачено: " + spent + ")"));
         Log.info("[mp-sectors] researched @ (spent: @)", content.name, spent.isEmpty() ? "-" : spent);
