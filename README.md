@@ -254,6 +254,8 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   campaign is swapped; a crash during the swap is recovered from `campaign.old/new/restore`;
   company names cannot collide with temp folders or Windows device names; a failed copy of
   research/moderators/bans aborts creation instead of silently losing them.
+- **2.4.5** (server 0.6.4): crash recovery prefers the whole `campaign.old` over a possibly
+  partial copy; company switch only accepts a directory.
 
 ### Co-op tools (2.3.0)
 
@@ -394,7 +396,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.4.4     # dist\MP-Sectors-2.4.4.zip
+.\package.ps1 -Version 2.4.5     # dist\MP-Sectors-2.4.5.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

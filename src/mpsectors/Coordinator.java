@@ -1837,7 +1837,9 @@ public class Coordinator{
         if(safe.equalsIgnoreCase(company)) return "{\"ok\":true}";
 
         Fi target = companiesDir.child(safe);
-        if(!target.exists()) return "{\"ok\":false,\"error\":\"Компания не найдена.\"}";
+        if(!target.exists() || !target.isDirectory()){
+            return "{\"ok\":false,\"error\":\"Компания не найдена.\"}";
+        }
 
         restoring = true;
         Log.info("[mp-sectors] switching company @ -> @", company, safe);
@@ -1912,7 +1914,9 @@ public class Coordinator{
         Fi restore = campaign.parent().child("campaign.restore");
 
         if(!hasSaves(campaign)){
-            Fi source = hasSaves(restore) ? restore : hasSaves(tmp) ? tmp : hasSaves(old) ? old : null;
+            //campaign.old is the live campaign moved out whole; prefer it over a copy that may
+            //have been interrupted halfway through
+            Fi source = hasSaves(old) ? old : hasSaves(restore) ? restore : hasSaves(tmp) ? tmp : null;
             if(source != null){
                 if(campaign.exists()) campaign.deleteDirectory();
                 source.moveTo(campaign);
