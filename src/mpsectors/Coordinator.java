@@ -1571,9 +1571,8 @@ public class Coordinator{
         if(home != null && home.loaded){
             Sector sector = home.sector();
             if(sector != null){
-                //the endless start sector is the lobby, not an attacked base
                 boolean attacked = sector.info != null && sector.info.hasCore
-                    && (sector.info.attack || (sector.id != sector.planet.startSector && sector.info.waves));
+                    && (sector.info.waves || sector.info.attack);
                 updateAttack(homeSector, attacked, current);
             }
         }
@@ -1885,7 +1884,9 @@ public class Coordinator{
 
             //a new company starts at the vanilla starting sector of the current planet, not at
             //the developed home sector the players happened to leave last
+            //a new company always starts at the starting sector, never at the previous home
             String startKey = startSectorKey();
+            if(startKey == null) startKey = initialStartKey();
             if(startKey != null){
                 Home start = new Home();
                 start.sector = startKey;
@@ -2134,8 +2135,18 @@ public class Coordinator{
             Log.err("[mp-sectors] could not close the home server", t);
         }
 
-        //a fresh campaign has no other lobby: rebuild the home now instead of dead-ending
-        //until the coordinator is restarted (reloadHome regenerates a core-less home)
+        //a fresh campaign has no other lobby: reset the home to the starting sector and rebuild
+        //it instead of dead-ending until the coordinator is restarted
+        String start = startSectorKey();
+        if(start == null) start = initialStartKey();
+        if(start != null && !start.equals(homeSector)){
+            try{
+                writeHome(start);
+                Log.info("[mp-sectors] home lost; resetting the home to the starting sector @", start);
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not write the starting home @", start, t);
+            }
+        }
         restoring = true;
         Core.app.post(this::reloadHome);
     }
@@ -2276,12 +2287,8 @@ public class Coordinator{
                     || (inst != null && !inst.stopping);
                 int players = key.equals(homeSector) ? homePlayers
                     : (inst == null || inst.stopping ? 0 : inst.players);
-                //the endless start sector is the lobby: it has waves, but is not "attacked"
-                boolean homeStart = key.equals(homeSector) && sector.id == sector.planet.startSector;
-                boolean attacked = info != null && info.hasCore
-                    && (info.attack || (!homeStart && info.waves));
-                boolean captured = info != null && info.hasCore && !attacked
-                    && (!info.waves || homeStart);
+                boolean attacked = info != null && info.hasCore && (info.waves || info.attack);
+                boolean captured = info != null && info.hasCore && !info.waves && !info.attack;
 
                 //the map asks for this list often; record a capture once, when it flips
                 synchronized(this){
@@ -3041,6 +3048,16 @@ public class Coordinator{
      * configured planet. SectorRunner.load() generates that sector from scratch on first load.
      */
     private String bootstrapCampaign(){
+        String key = initialStartKey();
+        if(key == null) return null;
+
+        writeHome(key);
+        Log.info("[mp-sectors] empty campaign: starting a new campaign at @", key);
+        return key;
+    }
+
+    /** The starting sector of the configured planet (Serpulo Ground Zero by default). */
+    private String initialStartKey(){
         Planet planet = Vars.content.getByName(ContentType.planet, config.planet);
         if(planet == null || planet.startSector < 0 || planet.startSector >= planet.sectors.size){
             planet = Vars.content.getByName(ContentType.planet, "serpulo");
@@ -3053,12 +3070,38 @@ public class Coordinator{
                 }
             }
         }
-        if(planet == null) return null;
+        return planet == null ? null : planet.name + "-" + planet.startSector;
+    }
 
-        String key = planet.name + "-" + planet.startSector;
-        writeHome(key);
-        Log.info("[mp-sectors] empty campaign: starting a new @ campaign at @", planet.name, key);
-        return key;
+    /** @return the starting sector of the planet used by the campaign's newest save, or null. */
+    private String startKeyFromSaves(){
+        Fi best = null;
+        for(Fi save : campaign.child("sectors").list()){
+            if(!save.extension().equals("msav")) continue;
+            if(best == null || save.file().lastModified() > best.file().lastModified()) best = save;
+        }
+        if(best == null) return null;
+
+        String key = best.nameWithoutExtension();
+        int split = key.lastIndexOf('-');
+        if(split <= 0) return null;
+        Planet planet = Vars.content.getByName(ContentType.planet, key.substring(0, split));
+        return planet == null ? null : planet.name + "-" + planet.startSector;
+    }
+
+    /** @return the starting sector key of the same planet as this key, or null. */
+    private String startKeyOf(String key){
+        if(!validSectorKey(key)) return null;
+        int split = key.lastIndexOf('-');
+        Planet planet = Vars.content.getByName(ContentType.planet, key.substring(0, split));
+        return planet == null ? null : planet.name + "-" + planet.startSector;
+    }
+
+    private boolean isStartKey(String key){
+        if(!validSectorKey(key)) return false;
+        int split = key.lastIndexOf('-');
+        Planet planet = Vars.content.getByName(ContentType.planet, key.substring(0, split));
+        return planet != null && Integer.parseInt(key.substring(split + 1)) == planet.startSector;
     }
 
     private boolean validSectorKey(String key){
@@ -3080,27 +3123,40 @@ public class Coordinator{
             try{
                 Home h = JsonIO.read(Home.class, homeFile.readString());
                 if(h != null && h.sector != null && !h.sector.isEmpty()){
-                    if(!validSectorKey(h.sector)){
-                        Log.warn("[mp-sectors] home.json names unknown sector @; ignoring it", h.sector);
-                    }else{
-                        //home.json is written by bootstrap before its sector exists. If saves were
-                        //imported afterwards, prefer them: otherwise the imported base is ignored
-                        //and an empty start sector is generated as the home.
-                        Fi saves = campaign.child("sectors");
-                        boolean hasSave = saves.child(h.sector + ".msav").exists();
-                        boolean anySave = false;
-                        for(Fi save : saves.list()){
-                            if(save.extension().equals("msav")){
-                                anySave = true;
-                                break;
-                            }
+                    if(validSectorKey(h.sector)){
+                        //home.json is authoritative, but a chosen sector without a save is a
+                        //lost home: the starting sector is the only fallback (the start itself
+                        //is allowed before its save is generated)
+                        boolean start = isStartKey(h.sector);
+                        if(start || campaign.child("sectors").child(h.sector + ".msav").exists()){
+                            return h.sector;
                         }
-                        if(hasSave || !anySave) return h.sector;
-                        Log.warn("[mp-sectors] home @ has no save; using the newest sector save instead and rewriting home.json (use /home to pick another sector)", h.sector);
+                        Log.warn("[mp-sectors] home @ has no save; resetting to the starting sector", h.sector);
+                        String reset = startKeyOf(h.sector);
+                        if(reset != null){
+                            writeHome(reset);
+                            return reset;
+                        }
+                    }else{
+                        Log.warn("[mp-sectors] home.json names unknown sector @; ignoring it", h.sector);
                     }
                 }
             }catch(Throwable ignored){
             }
+        }
+
+        //no usable home: an imported campaign starts at the starting sector of its own planet,
+        //not at the newest save and not necessarily at the configured planet
+        String start = startKeyFromSaves();
+        if(start == null) start = initialStartKey();
+        if(start != null){
+            try{
+                writeHome(start);
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not write the starting home @", start, t);
+            }
+            Log.info("[mp-sectors] home is unset; using the starting sector @", start);
+            return start;
         }
 
         Fi best = null;
@@ -3110,8 +3166,6 @@ public class Coordinator{
         }
         if(best == null) return null;
 
-        //record the choice: otherwise every start re-derives the home from file times, and an
-        //unclean stop could silently promote a different sector
         String key = best.nameWithoutExtension();
         try{
             writeHome(key);

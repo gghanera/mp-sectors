@@ -18,7 +18,7 @@ $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $ReleaseApi = "https://api.github.com/repos/gghanera/mp-sectors/releases/latest"
-$FallbackZip = "https://github.com/gghanera/mp-sectors/releases/download/v2.5.1/MP-Sectors-2.5.1.zip"
+$FallbackZip = "https://github.com/gghanera/mp-sectors/releases/download/v2.5.2/MP-Sectors-2.5.2.zip"
 
 function Write-Step($text){
     Write-Host ""
@@ -340,7 +340,7 @@ Write-Host "Кампания не нужна: при первом запуске
 Write-Host "кампания Serpulo (Ground Zero). Старую кампанию скопируй" -ForegroundColor Yellow
 Write-Host "ДО первого запуска в:" -ForegroundColor Yellow
 Write-Host "  $campaign" -ForegroundColor Yellow
-Write-Host "  (если сервер уже запускался, удали campaign\home.json перед копированием)" -ForegroundColor Yellow
+Write-Host "  (если сервер уже запускался, замени папку campaign целиком)" -ForegroundColor Yellow
 Write-Host "Запуск:" -ForegroundColor Yellow
 Write-Host "  $InstallDir\start-server.cmd" -ForegroundColor Yellow
 Write-Host ""

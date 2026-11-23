@@ -108,6 +108,9 @@ try{
     if(-not $create.ok){ Fail ('company create failed: ' + $create.error) }
     $status = (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$HttpPort/status" -TimeoutSec 10).Content | ConvertFrom-Json
     if($status.company -ne 'TestCompany'){ Fail 'company name not switched after create' }
+    if($status.home -ne 'serpulo-170'){ Fail "new company home is '$($status.home)', expected serpulo-170" }
+    $newSaves = @(Get-ChildItem (Join-Path $root 'campaign\sectors') -Filter '*.msav')
+    if($newSaves.Count -ne 1){ Fail "new company kept $($newSaves.Count) sector saves; expected only the starting sector" }
     if(-not (Test-Path (Join-Path $root 'campaign\unlocks.json'))){ Fail 'new company lost its research file' }
     if(-not (Test-Path (Join-Path $root 'companies\Основная'))){ Fail 'the old company was not archived' }
 

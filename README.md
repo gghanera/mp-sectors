@@ -100,8 +100,9 @@ run it on the server PC. It:
 
 It does **not** include a campaign, and does not need one: run `start-server.cmd` and the
 coordinator creates a new Serpulo campaign (Ground Zero). To continue an existing campaign,
-copy its `campaign` folder into `MP-Sectors\campaign` **before the first start**; if the server
-has already generated one, delete `campaign\home.json` before copying.
+copy its `campaign` folder into `MP-Sectors\campaign` **before the first start**. If the server
+has already run, stop it and replace the whole `campaign` folder (including its `home.json`);
+deleting `home.json` starts a new campaign at Ground Zero instead.
 
 ---
 
@@ -291,6 +292,10 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   as attacked and the next wave waits a minute; every start checks all Serpulo/Erekir sector info
   (a base whose save is gone is marked unowned); `home.json` is validated; the watchdog keeps the
   launch loadout; `/mods` serves `any-research.jar`; a failed start closes the game port.
+- **2.5.2** (server 0.7.2, client unchanged 2.5.1): a new company always starts at the planet's
+  starting sector (Ground Zero on Serpulo) with all sector saves reset; the home can be attacked
+  and has enemy waves; losing the home resets it to the starting sector; `home.json` is honoured
+  only while its save exists, so imported saves no longer become the home automatically.
 
 ### Co-op tools (2.3.0)
 
@@ -433,7 +438,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.5.1     # dist\MP-Sectors-2.5.1.zip
+.\package.ps1 -Version 2.5.2     # dist\MP-Sectors-2.5.2.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

@@ -86,6 +86,10 @@ try{
     if(-not (Test-Path (Join-Path $campaign ('info\' + $expected + '.json')))){ Fail 'sector info was not written' }
     $infos = @(Get-ChildItem (Join-Path $campaign 'info') -Filter '*.json')
     if($infos.Count -lt 20){ Fail ("campaign check created only $($infos.Count) sector info files") }
+    $sectors = (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$HttpPort/sectors" -TimeoutSec 10).Content | ConvertFrom-Json
+    $homeEntry = $sectors.sectors | Where-Object { "$($_.planet)-$($_.id)" -eq $expected }
+    if($homeEntry -eq $null){ Fail 'home sector is missing from /sectors' }
+    if(-not $homeEntry.attacked){ Fail 'the endless home is not reported as attackable' }
     $mods = Get-Content (Join-Path $campaign 'moderators.json') -Raw | ConvertFrom-Json
     if($mods -notcontains $Moderator){ Fail "moderators.json does not contain '$Moderator'" }
 
