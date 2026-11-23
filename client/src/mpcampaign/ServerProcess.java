@@ -27,6 +27,8 @@ public class ServerProcess{
         public int instanceBasePort = 6570;
         public int memoryMb = 1024;
         public boolean allowDuplicateClients = true;
+        public String planet = "serpulo";
+        public String moderator = "";
         public String serverJar = "";
         public String javaPath = "";
         public boolean steam;
@@ -164,6 +166,9 @@ public class ServerProcess{
             config.instanceBasePort = setting("mpcampaign-instance-port", 6570);
             config.memoryMb = setting("mpcampaign-memory", 1024);
             config.allowDuplicateClients = Core.settings.getBool("mpcampaign-allow-duplicates", true);
+            config.planet = Core.settings.getString("mpcampaign-planet", "serpulo");
+            //a brand-new campaign needs a moderator; the host is the one pressing the button
+            config.moderator = MpCampaignMod.localName();
             config.serverJar = jar.absolutePath().replace('\\', '/');
             config.javaPath = javaPath();
 

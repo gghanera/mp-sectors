@@ -18,6 +18,7 @@ public final class Moderators{
 
     private static Fi file;
     private static final List<String> names = new ArrayList<>();
+    private static String firstModerator = defaultName;
     private static boolean loaded;
     private static long lastModified;
 
@@ -25,9 +26,18 @@ public final class Moderators{
     }
 
     public static synchronized void init(Fi campaign){
+        init(campaign, null);
+    }
+
+    /**
+     * @param fallback the first moderator when moderators.json does not exist yet (the host's
+     *                 player name); blank keeps the historical default.
+     */
+    public static synchronized void init(Fi campaign, String fallback){
         file = campaign.child("moderators.json");
         loaded = false;
         names.clear();
+        firstModerator = fallback == null || fallback.isBlank() ? defaultName : fallback.trim();
         load();
     }
 
@@ -49,7 +59,7 @@ public final class Moderators{
             }
         }
 
-        if(names.isEmpty()) names.add(defaultName);
+        if(names.isEmpty()) names.add(firstModerator);
 
         //create the file on first run so the host can edit it without guessing the format
         if(file != null && !file.exists()) save();

@@ -60,6 +60,10 @@ public class Coordinator{
         /** Query GitHub Releases once a day and log a newer version. */
         public boolean updateCheck = true;
         public boolean allowDuplicateClients = true;
+        /** Planet for a brand-new campaign; empty or unknown falls back to Serpulo. */
+        public String planet = "serpulo";
+        /** First moderator of a brand-new campaign, usually the host's player name. */
+        public String moderator = "";
         public String serverJar = "";
         public String javaPath = "";
         public boolean steam;
@@ -267,10 +271,19 @@ public class Coordinator{
             if(config.javaPath == null || config.javaPath.isEmpty()) config.javaPath = Vars.javaPath;
 
             recoverCampaignSwap();
+
+            //an empty install must still boot: the campaign folder is created on first run
+            campaign.mkdirs();
+            campaign.child("sectors").mkdirs();
+            campaign.child("info").mkdirs();
+
             homeSector = readHomeSector();
             if(homeSector == null){
-                Log.err("[mp-sectors] coordinator: no sector saves in @", campaign.child("sectors").absolutePath());
-                return;
+                homeSector = bootstrapCampaign();
+                if(homeSector == null){
+                    Log.err("[mp-sectors] coordinator: no sector saves in @ and no planet with a start sector; set \"planet\" in mp-coordinator.json", campaign.child("sectors").absolutePath());
+                    return;
+                }
             }
 
             importInfo();
@@ -295,7 +308,7 @@ public class Coordinator{
             Log.info("[mp-sectors] gate cores: foundation=@ nucleus=@", Blocks.coreFoundation.unlocked(), Blocks.coreNucleus.unlocked());
 
             //read the shared lists before the port opens: a banned player must not slip in
-            Moderators.init(campaign);
+            Moderators.init(campaign, config.moderator);
             Bans.init(campaign);
 
             //a campaign paused before a coordinator restart stays paused
@@ -789,7 +802,7 @@ public class Coordinator{
             chatTextTime.clear();
 
             //the restored campaign may have different moderators/bans than the live lists
-            Moderators.init(campaign);
+            Moderators.init(campaign, config.moderator);
             Bans.init(campaign);
 
             String key = readHomeSector();
@@ -2886,11 +2899,51 @@ public class Coordinator{
         return false;
     }
 
+    /**
+     * An empty campaign folder (a fresh install) starts at the vanilla starting sector of the
+     * configured planet. SectorRunner.load() generates that sector from scratch on first load.
+     */
+    private String bootstrapCampaign(){
+        Planet planet = Vars.content.getByName(ContentType.planet, config.planet);
+        if(planet == null || planet.startSector < 0 || planet.startSector >= planet.sectors.size){
+            planet = Vars.content.getByName(ContentType.planet, "serpulo");
+        }
+        if(planet == null || planet.startSector < 0 || planet.startSector >= planet.sectors.size){
+            for(Planet other : Vars.content.planets()){
+                if(other.startSector >= 0 && other.startSector < other.sectors.size){
+                    planet = other;
+                    break;
+                }
+            }
+        }
+        if(planet == null) return null;
+
+        String key = planet.name + "-" + planet.startSector;
+        writeHome(key);
+        Log.info("[mp-sectors] empty campaign: starting a new @ campaign at @", planet.name, key);
+        return key;
+    }
+
     private String readHomeSector(){
         if(homeFile.exists()){
             try{
                 Home h = JsonIO.read(Home.class, homeFile.readString());
-                if(h != null && h.sector != null && !h.sector.isEmpty()) return h.sector;
+                if(h != null && h.sector != null && !h.sector.isEmpty()){
+                    //home.json is written by bootstrap before its sector exists. If saves were
+                    //imported afterwards, prefer them: otherwise the imported base is ignored
+                    //and an empty start sector is generated as the home.
+                    Fi saves = campaign.child("sectors");
+                    boolean hasSave = saves.child(h.sector + ".msav").exists();
+                    boolean anySave = false;
+                    for(Fi save : saves.list()){
+                        if(save.extension().equals("msav")){
+                            anySave = true;
+                            break;
+                        }
+                    }
+                    if(hasSave || !anySave) return h.sector;
+                    Log.warn("[mp-sectors] home @ has no save; using the newest sector save instead and rewriting home.json (use /home to pick another sector)", h.sector);
+                }
             }catch(Throwable ignored){
             }
         }
@@ -2900,7 +2953,17 @@ public class Coordinator{
             if(!save.extension().equals("msav")) continue;
             if(best == null || save.file().lastModified() > best.file().lastModified()) best = save;
         }
-        return best == null ? null : best.nameWithoutExtension();
+        if(best == null) return null;
+
+        //record the choice: otherwise every start re-derives the home from file times, and an
+        //unclean stop could silently promote a different sector
+        String key = best.nameWithoutExtension();
+        try{
+            writeHome(key);
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not record the home sector @", key, t);
+        }
+        return key;
     }
 
     private void writeHome(String key){

@@ -11,14 +11,14 @@ exit /b
 
 # MP Sectors - single-file server installer.
 # Installs the server into .\MP-Sectors and puts the client mods next to this file.
-# No campaign is bundled: copy your campaign folder afterwards.
+# The campaign folder starts empty; the coordinator creates a new Serpulo campaign on first run.
 
 try{ [Console]::OutputEncoding = [Text.Encoding]::UTF8 }catch{}
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $ReleaseApi = "https://api.github.com/repos/gghanera/mp-sectors/releases/latest"
-$FallbackZip = "https://github.com/gghanera/mp-sectors/releases/download/v2.1.0/MP-Sectors-2.1.0.zip"
+$FallbackZip = "https://github.com/gghanera/mp-sectors/releases/download/v2.5.0/MP-Sectors-2.5.0.zip"
 
 function Write-Step($text){
     Write-Host ""
@@ -333,15 +333,19 @@ Write-Host "==============================================" -ForegroundColor Gre
 Write-Host "Сервер:          $InstallDir"
 Write-Host "Клиентские моды: $ActivationDir\mp-campaign.jar"
 Write-Host "                 $ActivationDir\any-research.jar"
-Write-Host "Кампания:        $campaign  (пустая)"
+Write-Host "Кампания:        $campaign  (новая создастся при первом запуске)"
 Write-Host "Снимки:          $SnapshotDir"
 Write-Host ""
-Write-Host "Кампания НЕ включена в установщик." -ForegroundColor Yellow
-Write-Host "Скопируй свою папку campaign в:" -ForegroundColor Yellow
+Write-Host "Кампания не нужна: при первом запуске сама создастся новая" -ForegroundColor Yellow
+Write-Host "кампания Serpulo (Ground Zero). Старую кампанию скопируй" -ForegroundColor Yellow
+Write-Host "ДО первого запуска в:" -ForegroundColor Yellow
 Write-Host "  $campaign" -ForegroundColor Yellow
-Write-Host "после этого запусти:" -ForegroundColor Yellow
+Write-Host "  (если сервер уже запускался, удали campaign\home.json перед копированием)" -ForegroundColor Yellow
+Write-Host "Запуск:" -ForegroundColor Yellow
 Write-Host "  $InstallDir\start-server.cmd" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Игроки подключаются к IP_ЭТОГО_ПК:6567."
+Write-Host "Модератор новой кампании: $env:USERNAME" -ForegroundColor Yellow
+Write-Host "  (если ник в игре другой, впиши его в campaign\moderators.json)"
 Write-Host "Клиентские моды раздай игрокам (mp-campaign.jar и any-research.jar)."
 Write-Host ""

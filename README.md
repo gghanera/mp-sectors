@@ -56,6 +56,12 @@ coordinator ready: game 127.0.0.1:6567, http 127.0.0.1:8090
 Players connect to `IP:6567` like to a normal Mindustry server. The coordinator hosts the
 **home sector**; other sectors are started on demand.
 
+No campaign folder is needed: with an empty `campaign\` the coordinator creates a new Serpulo
+campaign and generates **Ground Zero** on first start. Pass `-Moderator <your Mindustry name>`
+to `mp-sectors.ps1 coordinator` so you can use pause, snapshots and the admin panel; `-Planet
+erekir` starts the Erekir campaign instead. To keep an existing campaign, copy its folder into
+`campaign\` before starting.
+
 Stop it with:
 
 ```powershell
@@ -79,7 +85,8 @@ Then restart Mindustry and join `IP:6567`.
 Instead of PowerShell, open **Main menu → “Сервер кампании”** (bottom-left) or press `F9`.
 The launcher writes `coordinator/config/mp-coordinator.json`, copies the mods, starts the
 server jar on the game JRE and shows status. It also has a **“Карта”** button that opens the
-server's campaign map before you connect.
+server's campaign map before you connect. On a fresh campaign your player name becomes the
+first moderator.
 
 ### 4. One-file server installer
 
@@ -91,8 +98,10 @@ run it on the server PC. It:
 - checks/installs Java 17+ and PowerShell 7 if needed;
 - creates `start-server.cmd`, `stop-server.cmd`, firewall rules and a desktop shortcut.
 
-It does **not** include a campaign. Copy your `campaign` folder into
-`MP-Sectors\campaign` and run `start-server.cmd`.
+It does **not** include a campaign, and does not need one: run `start-server.cmd` and the
+coordinator creates a new Serpulo campaign (Ground Zero). To continue an existing campaign,
+copy its `campaign` folder into `MP-Sectors\campaign` **before the first start**; if the server
+has already generated one, delete `campaign\home.json` before copying.
 
 ---
 
@@ -164,7 +173,9 @@ Players in different sectors see each other's chat:
 ### Moderators
 
 Moderators can pause, change speed, abandon sectors and manage snapshots. The list is
-`campaign\moderators.json` (default `["GGhanera"]`):
+`campaign\moderators.json`. On a new campaign it is created with the host's name: the in-game
+launcher uses your player name, `mp-sectors.ps1 coordinator -Moderator <name>` uses that name,
+and `GGhanera` is the fallback when neither is given:
 
 ```json
 ["GGhanera", "IgorPank"]
@@ -266,6 +277,14 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   who switches cannot be locked out by the target's moderator list.
 - **2.4.9** (server 0.6.8): snapshot/daily pruning is per company, so another company's
   activity can no longer delete this company's backups.
+- **2.5.0 — playing from scratch** (server 0.7.0, client 2.5.0): an empty `campaign/` now
+  creates its own campaign and generates the planet's start sector (Serpulo Ground Zero by
+  default, Erekir with `planet`/`-Planet erekir`) instead of refusing to boot; the first
+  moderator is the launcher's player name (`moderator`/`-Moderator`, `GGhanera` fallback);
+  `fetch.ps1` works on PowerShell 7; `init`/`coordinator` create `home.json`; a `home.json`
+  that names a sector without a save falls back to the newest save and is repaired; the
+  source-build launcher finds `client\build\mp-campaign.jar`; `test-fresh.ps1` covers the
+  empty-install path.
 
 ### Co-op tools (2.3.0)
 
@@ -319,6 +338,8 @@ The HTTP API still has no token, so the panel is meant for a trusted network
 | `updateCheck` | `true` | Check GitHub Releases once a day and log a newer version |
 | `memoryMb` | `1024` | JVM heap per instance |
 | `allowDuplicateClients` | `true` | Allow two windows from one PC |
+| `planet` | `serpulo` | Planet for a brand-new campaign (`serpulo` or `erekir`) |
+| `moderator` | — | First moderator of a brand-new campaign (host name) |
 | `serverJar`, `javaPath` | — | Server jar and JDK paths |
 
 ### Campaign files
@@ -406,7 +427,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.4.9     # dist\MP-Sectors-2.4.9.zip
+.\package.ps1 -Version 2.5.0     # dist\MP-Sectors-2.5.0.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of
@@ -414,6 +435,14 @@ the campaign):
 
 ```powershell
 .\test-admin.ps1
+```
+
+Check that an empty install starts by itself (starts a throwaway coordinator with no campaign
+twice: the first run generates Ground Zero, the second must load it):
+
+```powershell
+.\test-fresh.ps1
+.\test-fresh.ps1 -Planet erekir
 ```
 
 ---

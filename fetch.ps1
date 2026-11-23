@@ -8,7 +8,6 @@ param(
     [switch]$Client,
     [switch]$All
 )
-
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 
@@ -27,12 +26,12 @@ function Get-Jar($url, $target){
     Get-Item $target | Select-Object FullName,Length
 }
 
-$server = Join-Path $root "libs\server-release.jar"
-$client = Join-Path $root "client\libs\Mindustry.jar"
+$serverJar = Join-Path $root "libs\server-release.jar"
+$clientJar = Join-Path $root "client\libs\Mindustry.jar"
 
 if($All -or -not $Client){
-    Get-Jar "https://github.com/Anuken/Mindustry/releases/download/$Version/server-release.jar" $server
+    Get-Jar "https://github.com/Anuken/Mindustry/releases/download/$Version/server-release.jar" $serverJar
 }
 if($All -or $Client){
-    Get-Jar "https://github.com/Anuken/Mindustry/releases/download/$Version/Mindustry.jar" $client
+    Get-Jar "https://github.com/Anuken/Mindustry/releases/download/$Version/Mindustry.jar" $clientJar
 }

@@ -21,6 +21,8 @@
 # Coordinator runtime: instances, configs, settings, logs
 /coordinator/
 /config/
+/instances/
+/instances.json
 
 # Local / editor / OS files
 .idea/

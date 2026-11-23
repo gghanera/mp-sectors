@@ -29,6 +29,9 @@ param(
     [int]$MaxSectors = 5,
     [int]$MaxPlayers = 10,
     [int]$IdleStop = 60,
+    [ValidateSet('serpulo', 'erekir')]
+    [string]$Planet = 'serpulo',
+    [string]$Moderator = "",
     [string]$SnapshotDir = ""
 )
 
@@ -46,6 +49,20 @@ $StateFile  = Join-Path $Root "instances.json"
 if(-not $ServerJar){ $ServerJar = Join-Path $Root "libs\server-release.jar" }
 if(-not $SnapshotDir){
     $SnapshotDir = if(Test-Path "F:\"){ "F:\MP-Sectors\backups" } else { Join-Path $Root "backups" }
+}
+if(-not $Moderator){ $Moderator = $env:USERNAME }
+
+# Create the campaign folder and its first home sector. The coordinator generates the sector
+# itself; without home.json a fresh install refuses to start.
+function Initialize-Campaign {
+    New-Item -ItemType Directory -Force $Campaign, $SectorsDir, $InfoDir | Out-Null
+    $homeFile = Join-Path $Campaign "home.json"
+    $saves = @(Get-ChildItem $SectorsDir -Filter *.msav -ErrorAction SilentlyContinue)
+    if(-not (Test-Path $homeFile) -and $saves.Count -eq 0){
+        $start = if($Planet -eq 'erekir'){ 10 } else { 170 }
+        Set-Content -Path $homeFile -Value ('{sector:' + $Planet + '-' + $start + '}') -NoNewline -Encoding ascii
+        Write-Host "campaign: new $Planet campaign at $Planet-$start"
+    }
 }
 
 function Get-Java {
@@ -102,7 +119,8 @@ function Get-Instance($state, $name){
 
 switch($Action){
     'init' {
-        New-Item -ItemType Directory -Force $SectorsDir, $InfoDir, $Instances | Out-Null
+        Initialize-Campaign
+        New-Item -ItemType Directory -Force $Instances | Out-Null
         if(-not (Test-Path $StateFile)){ Write-State @() }
         if(-not (Test-Path $ServerJar)){ Write-Host "server jar missing: run .\fetch.ps1" -ForegroundColor Yellow }
         if(-not (Test-Path $ModJar)){ Write-Host "mod jar missing: run .\build.ps1" -ForegroundColor Yellow }
@@ -228,10 +246,11 @@ switch($Action){
         $dir = Join-Path $Root "coordinator"
         New-Item -ItemType Directory -Force (Join-Path $dir "config\mods"), (Join-Path $dir "config\saves") | Out-Null
         Copy-Item $ModJar (Join-Path $dir "config\mods\mp-sectors.jar") -Force
+        Initialize-Campaign
 
         #the client mod must be on every server too: the mod list is compared on connect
         $clientMod = Join-Path $Root "mods\mp-campaign.jar"
-        if(-not (Test-Path $clientMod)){ $clientMod = Join-Path (Split-Path $Root -Parent) "mp-campaign\build\mp-campaign.jar" }
+        if(-not (Test-Path $clientMod)){ $clientMod = Join-Path $Root "client\build\mp-campaign.jar" }
         if(Test-Path $clientMod){ Copy-Item $clientMod (Join-Path $dir "config\mods\mp-campaign.jar") -Force }
 
         if(-not $SteamDir){
@@ -254,6 +273,8 @@ switch($Action){
             playerLimit      = $PlayerLimit
             instanceBasePort = $InstancePort
             memoryMb         = $MemoryMb
+            planet           = $Planet
+            moderator        = $Moderator
             serverJar        = (Resolve-Path $ServerJar).Path.Replace('\', '/')
             javaPath         = ""
             steam            = $useSteam

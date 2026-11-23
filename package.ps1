@@ -1,7 +1,7 @@
 # Builds a distributable zip: server, mods, scripts and docs.
 # Run the three build scripts first (or let the launcher build the server mod).
 param(
-    [string]$Version = "2.4.9"
+    [string]$Version = "2.5.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,10 +36,11 @@ Copy-Item (Join-Path $root "mp-sectors.ps1") $stage
 Copy-Item (Join-Path $root "fetch.ps1") $stage
 Copy-Item (Join-Path $root "build.ps1") $stage
 Copy-Item (Join-Path $root "test-admin.ps1") $stage
+Copy-Item (Join-Path $root "test-fresh.ps1") $stage
 Copy-Item (Join-Path $root "mod.hjson") $stage
 Copy-Item (Join-Path $root "README.md") $stage
 Copy-Item (Join-Path $root "README.ru.md") $stage
-Copy-Item (Join-Path $root "docs\MP-Sectors-полное-описание.txt") (Join-Path $stage "docs")
+Copy-Item (Join-Path $root "docs\*.txt") (Join-Path $stage "docs")
 
 $zip = Join-Path $out "MP-Sectors-$Version.zip"
 Remove-Item -Force $zip -ErrorAction SilentlyContinue
