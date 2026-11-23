@@ -97,8 +97,13 @@ public class SectorRunner{
             boolean infoUsable = false;
             if(campaignInfo.exists()){
                 try{
-                    sector.info = JsonIO.read(SectorInfo.class, campaignInfo.readString());
-                    infoUsable = true;
+                    SectorInfo parsed = JsonIO.read(SectorInfo.class, campaignInfo.readString());
+                    //a neutral placeholder from verifyCampaign() must not overwrite the live
+                    //world's wave rules; treat it as missing and recover from the save instead
+                    if(parsed != null && (parsed.hasCore || parsed.wave != 0)){
+                        sector.info = parsed;
+                        infoUsable = true;
+                    }
                 }catch(Throwable t){
                     Log.err("[mp-sectors] could not read sector info", t);
                 }

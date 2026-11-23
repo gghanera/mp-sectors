@@ -84,6 +84,8 @@ try{
     $save = Join-Path $campaign ('sectors\' + $expected + '.msav')
     if(-not (Test-Path $save)){ Fail "first sector was not generated: $save" }
     if(-not (Test-Path (Join-Path $campaign ('info\' + $expected + '.json')))){ Fail 'sector info was not written' }
+    $infos = @(Get-ChildItem (Join-Path $campaign 'info') -Filter '*.json')
+    if($infos.Count -lt 20){ Fail ("campaign check created only $($infos.Count) sector info files") }
     $mods = Get-Content (Join-Path $campaign 'moderators.json') -Raw | ConvertFrom-Json
     if($mods -notcontains $Moderator){ Fail "moderators.json does not contain '$Moderator'" }
 

@@ -43,7 +43,7 @@ MP-Sectors/
 Steam-сборка Mindustry портативная: данные лежат не в `%APPDATA%`, а в
 `...\steamapps\common\Mindustry\saves\`.
 
-- моды: `...\saves\mods\` — `mp-campaign.jar` (2.5.0) и `any-research.jar`;
+- моды: `...\saves\mods\` — `mp-campaign.jar` (2.5.1) и `any-research.jar`;
 - кампания: `...\saves\saves\` и `...\saves\settings.bin`.
 
 Кампания из Steam переносится в `campaign/` (87 секторов Serpulo/Erekir, исследования и
@@ -333,6 +333,12 @@ handshake (сервер видит TCP-подключение, но не пол�
   PowerShell 7; `init`/`coordinator` создают `home.json`; `home.json` на сектор без сейва
   откатывается на самый свежий сейв и исправляется; лаунчер из исходников находит
   `client\build\mp-campaign.jar`; добавлен `test-fresh.ps1`.
+- **2.5.1** (сервер 0.7.1, клиент 2.5.1, any-research 1.0.1): бесконечный Ground Zero больше не
+  блокирует собственные узлы дерева (`SectorComplete`), поэтому кампания может уйти со стартового
+  сектора; потерянный дом отстраивается без перезапуска координатора; дом больше не показывается
+  атакованным, а следующая волна ждёт минуту; каждый запуск проверяет info всех секторов
+  Serpulo/Erekir (база без сейва помечается потерянной); `home.json` валидируется; watchdog
+  сохраняет loadout; `/mods` отдаёт `any-research.jar`; неудачный старт закрывает игровой порт.
 
 ### Новое в 2.3.0
 
@@ -479,7 +485,7 @@ cd ..\any-research
 Собрать архив для игроков (моды + скрипты + документация):
 
 ```powershell
-.\package.ps1 -Version 2.5.0     # dist\MP-Sectors-2.5.0.zip
+.\package.ps1 -Version 2.5.1     # dist\MP-Sectors-2.5.1.zip
 ```
 
 Проверить админ-API (запускает временный координатор на копии кампании):

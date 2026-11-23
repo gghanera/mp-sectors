@@ -40,6 +40,8 @@ public class InstanceManager{
         public boolean stopping;
         /** true once the instance is listening; set after the port opens, outside the manager lock */
         public volatile boolean ready;
+        /** Launch loadout/resources, reused if the watchdog has to restart a sector. */
+        public String loadout = "", resources = "";
 
         public Instance(String sector, int port, Fi dir){
             this.sector = sector;
@@ -203,6 +205,8 @@ public class InstanceManager{
                 dir.child("exit.reason").delete();
 
                 out = new Instance(sector, port, dir);
+                out.loadout = cfg.loadout;
+                out.resources = cfg.resources;
                 out.process = builder.start();
                 out.started = System.currentTimeMillis();
                 instances.add(out);
@@ -338,7 +342,7 @@ public class InstanceManager{
 
         if(notify != null) notify.get("Сектор " + inst.sector + " упал, перезапускаю (" + state[1] + "/3)...");
         Thread thread = new Thread(() -> {
-            Instance restarted = start(inst.sector);
+            Instance restarted = start(inst.sector, inst.loadout, inst.resources);
             if(notify != null){
                 notify.get(restarted == null
                     ? "Не удалось перезапустить сектор " + inst.sector + "."

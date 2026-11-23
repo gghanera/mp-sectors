@@ -285,6 +285,12 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   that names a sector without a save falls back to the newest save and is repaired; the
   source-build launcher finds `client\build\mp-campaign.jar`; `test-fresh.ps1` covers the
   empty-install path.
+- **2.5.1** (server 0.7.1, client 2.5.1, any-research 1.0.1): the endless Ground Zero lobby no
+  longer blocks its own tech-tree nodes (`SectorComplete`), so the campaign can leave the first
+  sector; a lost home is rebuilt without restarting the coordinator; the home is no longer shown
+  as attacked and the next wave waits a minute; every start checks all Serpulo/Erekir sector info
+  (a base whose save is gone is marked unowned); `home.json` is validated; the watchdog keeps the
+  launch loadout; `/mods` serves `any-research.jar`; a failed start closes the game port.
 
 ### Co-op tools (2.3.0)
 
@@ -427,7 +433,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.5.0     # dist\MP-Sectors-2.5.0.zip
+.\package.ps1 -Version 2.5.1     # dist\MP-Sectors-2.5.1.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

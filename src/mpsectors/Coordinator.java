@@ -287,6 +287,7 @@ public class Coordinator{
             }
 
             importInfo();
+            verifyCampaign();
 
             home = new SectorRunner(config.campaign, homeSector);
             if(!home.load()){
@@ -396,6 +397,11 @@ public class Coordinator{
         try{
             if(http != null) http.stop(0);
             if(httpExecutor != null) httpExecutor.shutdownNow();
+        }catch(Throwable ignored){}
+        try{
+            //a failed start after openServer() must not leave the game port hosted without a
+            //coordinator behind it
+            if(Vars.net != null) Vars.net.closeServer();
         }catch(Throwable ignored){}
         try{
             instances.stopAll();
@@ -804,6 +810,7 @@ public class Coordinator{
             //the restored campaign may have different moderators/bans than the live lists
             Moderators.init(campaign, config.moderator);
             Bans.init(campaign);
+            verifyCampaign();
 
             String key = readHomeSector();
             if(key == null) key = homeSector;
@@ -1564,8 +1571,9 @@ public class Coordinator{
         if(home != null && home.loaded){
             Sector sector = home.sector();
             if(sector != null){
+                //the endless start sector is the lobby, not an attacked base
                 boolean attacked = sector.info != null && sector.info.hasCore
-                    && (sector.info.waves || sector.info.attack);
+                    && (sector.info.attack || (sector.id != sector.planet.startSector && sector.info.waves));
                 updateAttack(homeSector, attacked, current);
             }
         }
@@ -2088,8 +2096,9 @@ public class Coordinator{
             Vars.state.rules.winWave = endlessWave;
         }
         if(Vars.state != null){
-            //the tutorial save may have stopped its wave timer at the capture wave
-            Vars.state.wavetime = 0f;
+            //the tutorial save may have stopped its wave timer at the capture wave; give a
+            //fresh group a minute to look around instead of spawning the next wave instantly
+            Vars.state.wavetime = 60f;
         }
 
         if(sector.info == null || (sector.info.waves && sector.info.winWave == endlessWave)) return;
@@ -2109,7 +2118,7 @@ public class Coordinator{
 
     /** The home sector's core was destroyed: keep the save, mark it unowned, stop autosaving it. */
     public void homeLost(){
-        if(home == null || !home.loaded) return;
+        if(home == null || !home.loaded || restoring) return;
         home.save();
         home.markLost();
         home.loaded = false;
@@ -2124,6 +2133,11 @@ public class Coordinator{
         }catch(Throwable t){
             Log.err("[mp-sectors] could not close the home server", t);
         }
+
+        //a fresh campaign has no other lobby: rebuild the home now instead of dead-ending
+        //until the coordinator is restarted (reloadHome regenerates a core-less home)
+        restoring = true;
+        Core.app.post(this::reloadHome);
     }
 
     /** The home sector was won: keep the base, record it and reload the world. */
@@ -2262,7 +2276,12 @@ public class Coordinator{
                     || (inst != null && !inst.stopping);
                 int players = key.equals(homeSector) ? homePlayers
                     : (inst == null || inst.stopping ? 0 : inst.players);
-                boolean captured = info != null && info.hasCore && !info.waves && !info.attack;
+                //the endless start sector is the lobby: it has waves, but is not "attacked"
+                boolean homeStart = key.equals(homeSector) && sector.id == sector.planet.startSector;
+                boolean attacked = info != null && info.hasCore
+                    && (info.attack || (!homeStart && info.waves));
+                boolean captured = info != null && info.hasCore && !attacked
+                    && (!info.waves || homeStart);
 
                 //the map asks for this list often; record a capture once, when it flips
                 synchronized(this){
@@ -2284,7 +2303,7 @@ public class Coordinator{
                     .append("\"note\":\"").append(esc(noteField(notes, key, "note"))).append("\",")
                     .append("\"hasBase\":").append(hasBase).append(',')
                     .append("\"captured\":").append(captured).append(',')
-                    .append("\"attacked\":").append(info != null && info.hasCore && (info.waves || info.attack)).append(',')
+                    .append("\"attacked\":").append(attacked).append(',')
                     .append("\"allowed\":").append(allowed(sector, snap)).append(',')
                     .append("\"running\":").append(running).append(',')
                     .append("\"players\":").append(players);
@@ -2343,7 +2362,7 @@ public class Coordinator{
 
         if(key.equals(homeSector)){
             if(home == null || !home.loaded){
-                out.error = "Домашний сектор потерян: он отстроится заново при следующем запуске координатора.";
+                out.error = "Домашний сектор потерян: он пересобирается, попробуйте через несколько секунд.";
                 return landJson(out);
             }
             out.ok = true;
@@ -2700,12 +2719,30 @@ public class Coordinator{
         return Vars.modDirectory;
     }
 
+    /**
+     * The coordinator only loads mp-sectors and mp-campaign; any-research is client-side and
+     * lives in client-mods/ or a source build folder. Look there before giving up.
+     */
+    private Fi clientMod(String name){
+        if(modsDir != null){
+            Fi file = modsDir.child(name);
+            if(file.exists()) return file;
+        }
+
+        Fi root = campaign.parent();
+        for(String dir : new String[]{"client-mods", "mods", "client/build", "any-research/build"}){
+            Fi file = root.child(dir).child(name);
+            if(file.exists()) return file;
+        }
+        return null;
+    }
+
     private String modsJson(HttpExchange ex){
         StringBuilder json = new StringBuilder("{\"ok\":true,\"files\":[");
         boolean first = true;
         for(String name : new String[]{"mp-campaign.jar", "any-research.jar"}){
-            Fi file = modsDir == null ? null : modsDir.child(name);
-            if(file == null || !file.exists()) continue;
+            Fi file = clientMod(name);
+            if(file == null) continue;
 
             if(!first) json.append(',');
             first = false;
@@ -2722,8 +2759,7 @@ public class Coordinator{
         try{
             String name = query(ex, "file");
             if(name != null && (name.equals("mp-campaign.jar") || name.equals("any-research.jar"))){
-                Fi candidate = modsDir == null ? null : modsDir.child(name);
-                if(candidate != null && candidate.exists()) source = candidate;
+                source = clientMod(name);
             }
 
             if(source == null){
@@ -2774,12 +2810,28 @@ public class Coordinator{
      * folder once. Without it every imported save would look like a base and the whole map unlocks.
      */
     private void importInfo(){
+        SectorRunner.withCampaignLock(campaign, this::importInfoLocked);
+    }
+
+    private void importInfoLocked(){
         for(Fi save : campaign.child("sectors").list()){
             if(!save.extension().equals("msav")) continue;
 
             String key = save.nameWithoutExtension();
             Fi infoFile = campaign.child("info").child(key + ".json");
-            if(infoFile.exists()) continue;
+            if(infoFile.exists()){
+                try{
+                    SectorInfo existing = JsonIO.read(SectorInfo.class, infoFile.readString());
+                    //a neutral placeholder from verifyCampaign() is not real metadata: a save
+                    //copied in later must get its info imported instead of staying unowned
+                    boolean placeholder = existing == null
+                        || (!existing.hasCore && existing.wave == 0
+                            && existing.storageCapacity == 0 && existing.lastPresetName == null);
+                    if(!placeholder) continue;
+                }catch(Throwable t){
+                    continue;
+                }
+            }
 
             int split = key.lastIndexOf('-');
             if(split <= 0) continue;
@@ -2798,6 +2850,91 @@ public class Coordinator{
             SectorRunner.writeAtomic(infoFile, JsonIO.write(info));
             Log.info("[mp-sectors] imported sector info for @ (core=@)", key, info.hasCore);
         }
+    }
+
+    /**
+     * Every coordinator start checks the whole campaign, not just the home: all sectors of the
+     * regular campaign (accessible planets) get their info file, and an info that claims a base
+     * without a save is repaired. Unvisited sectors stay save-less: they are generated on landing.
+     */
+    private void verifyCampaign(){
+        SectorRunner.withCampaignLock(campaign, this::verifyCampaignLocked);
+    }
+
+    private void verifyCampaignLocked(){
+        Fi infoDir = campaign.child("info");
+        Fi sectorDir = campaign.child("sectors");
+        infoDir.mkdirs();
+        sectorDir.mkdirs();
+
+        int checked = 0, bases = 0, repaired = 0, needsRecovery = 0;
+        for(Planet planet : Vars.content.planets()){
+            if(planet.sectors.size == 0 || !planet.accessible || !planet.visible || planet.removed
+                || planet.techTree == null) continue;
+
+            for(Sector sector : planet.sectors){
+                checked++;
+                String key = planet.name + "-" + sector.id;
+                Fi save = sectorDir.child(key + ".msav");
+                Fi file = infoDir.child(key + ".json");
+
+                SectorInfo info = null;
+                if(file.exists()){
+                    try{
+                        info = JsonIO.read(SectorInfo.class, file.readString());
+                    }catch(Throwable t){
+                        Log.err("[mp-sectors] could not read sector info for @", key, t);
+                    }
+                }
+
+                if(info == null){
+                    if(save.exists()){
+                        //let SectorRunner recover the metadata from the save; a neutral entry
+                        //here would hide a real base
+                        needsRecovery++;
+                        continue;
+                    }
+
+                    info = new SectorInfo();
+                    info.hasCore = false;
+                    info.waves = false;
+                    info.attack = false;
+                    info.storageCapacity = 0;
+                    info.items.clear();
+                    //placeholder marker: if a save is copied in later, SectorRunner must load it
+                    //(and rebuild this info) instead of regenerating the imported base
+                    info.wave = 0;
+                    try{
+                        SectorRunner.writeAtomic(file, JsonIO.write(info));
+                        repaired++;
+                    }catch(Throwable t){
+                        Log.err("[mp-sectors] could not create sector info for @", key, t);
+                    }
+                    continue;
+                }
+
+                if(info.hasCore){
+                    if(save.exists()){
+                        bases++;
+                    }else{
+                        Log.warn("[mp-sectors] sector @ has a base in info but no save; marking it unowned", key);
+                        info.hasCore = false;
+                        info.waves = false;
+                        info.attack = false;
+                        info.items.clear();
+                        try{
+                            SectorRunner.writeAtomic(file, JsonIO.write(info));
+                            repaired++;
+                        }catch(Throwable t){
+                            Log.err("[mp-sectors] could not repair sector info for @", key, t);
+                        }
+                    }
+                }
+            }
+        }
+
+        Log.info("[mp-sectors] campaign check: @ sectors, @ bases, @ repaired, @ saves need info recovery",
+            checked, bases, repaired, needsRecovery);
     }
 
     private static class Snapshot{
@@ -2924,25 +3061,43 @@ public class Coordinator{
         return key;
     }
 
+    private boolean validSectorKey(String key){
+        if(key == null) return false;
+        int split = key.lastIndexOf('-');
+        if(split <= 0 || split == key.length() - 1) return false;
+        Planet planet = Vars.content.getByName(ContentType.planet, key.substring(0, split));
+        if(planet == null) return false;
+        try{
+            int id = Integer.parseInt(key.substring(split + 1));
+            return id >= 0 && id < planet.sectors.size;
+        }catch(NumberFormatException e){
+            return false;
+        }
+    }
+
     private String readHomeSector(){
         if(homeFile.exists()){
             try{
                 Home h = JsonIO.read(Home.class, homeFile.readString());
                 if(h != null && h.sector != null && !h.sector.isEmpty()){
-                    //home.json is written by bootstrap before its sector exists. If saves were
-                    //imported afterwards, prefer them: otherwise the imported base is ignored
-                    //and an empty start sector is generated as the home.
-                    Fi saves = campaign.child("sectors");
-                    boolean hasSave = saves.child(h.sector + ".msav").exists();
-                    boolean anySave = false;
-                    for(Fi save : saves.list()){
-                        if(save.extension().equals("msav")){
-                            anySave = true;
-                            break;
+                    if(!validSectorKey(h.sector)){
+                        Log.warn("[mp-sectors] home.json names unknown sector @; ignoring it", h.sector);
+                    }else{
+                        //home.json is written by bootstrap before its sector exists. If saves were
+                        //imported afterwards, prefer them: otherwise the imported base is ignored
+                        //and an empty start sector is generated as the home.
+                        Fi saves = campaign.child("sectors");
+                        boolean hasSave = saves.child(h.sector + ".msav").exists();
+                        boolean anySave = false;
+                        for(Fi save : saves.list()){
+                            if(save.extension().equals("msav")){
+                                anySave = true;
+                                break;
+                            }
                         }
+                        if(hasSave || !anySave) return h.sector;
+                        Log.warn("[mp-sectors] home @ has no save; using the newest sector save instead and rewriting home.json (use /home to pick another sector)", h.sector);
                     }
-                    if(hasSave || !anySave) return h.sector;
-                    Log.warn("[mp-sectors] home @ has no save; using the newest sector save instead and rewriting home.json (use /home to pick another sector)", h.sector);
                 }
             }catch(Throwable ignored){
             }

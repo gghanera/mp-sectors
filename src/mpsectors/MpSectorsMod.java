@@ -764,7 +764,7 @@ public class MpSectorsMod extends Mod{
                     chatPort = config.httpPort;
                     coordinator.start();
                     if(!coordinator.isStarted()){
-                        Log.err("[mp-sectors] coordinator failed to start; continuing as a normal server");
+                        Log.err("[mp-sectors] coordinator failed to start; the game port stays closed");
                         try{
                             coordinator.shutdown();
                         }catch(Throwable ignored){

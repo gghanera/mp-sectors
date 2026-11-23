@@ -64,7 +64,8 @@ public class ResearchServer{
         research(node, player);
     }
 
-    private static void research(TechNode node, @Nullable Player player){        UnlockableContent content = node.content;
+    private static void research(TechNode node, @Nullable Player player){
+        UnlockableContent content = node.content;
 
         if(content.unlockedHost()){
             reply(player, "[lightgray]Уже исследовано: [white]" + label(content));
@@ -74,7 +75,7 @@ public class ResearchServer{
         if(!objectivesMet(node)){
             Seq<String> pending = new Seq<>();
             for(Objective objective : node.objectives){
-                if(!objective.complete()) pending.add(describe(objective));
+                if(!objectiveMet(objective)) pending.add(describe(objective));
             }
             reply(player, "[scarlet]Условия ещё не выполнены: [lightgray]" + String.join(", ", pending));
             return;
@@ -109,9 +110,72 @@ public class ResearchServer{
 
     private static boolean objectivesMet(TechNode node){
         for(Objective objective : node.objectives){
-            if(!objective.complete()) return false;
+            if(!objectiveMet(objective)) return false;
         }
         return true;
+    }
+
+    /**
+     * A dedicated server never creates SaveSlot objects, so vanilla SectorComplete/OnSector/
+     * OnPlanet always return false here. Evaluate them against the campaign files instead.
+     * The endless start sector counts as completed: the mod uses it as the lobby.
+     */
+    private static boolean objectiveMet(Objective objective){
+        if(objective instanceof Objectives.OnSector on){
+            return baseInfo(on.preset.sector) != null;
+        }
+        if(objective instanceof Objectives.SectorComplete done){
+            Sector sector = done.preset == null ? null : done.preset.sector;
+            SectorInfo info = baseInfo(sector);
+            if(info == null) return false;
+            return sector.id == sector.planet.startSector || (!info.waves && !info.attack);
+        }
+        if(objective instanceof Objectives.OnPlanet on){
+            return hasBase(on.planet);
+        }
+        return objective.complete();
+    }
+
+    /** @return this sector's info when it has a base and a save, null otherwise. */
+    private static @Nullable SectorInfo baseInfo(@Nullable Sector sector){
+        if(sector == null || campaignPath == null) return null;
+
+        Fi dir = Core.files.absolute(campaignPath);
+        String key = sector.planet.name + "-" + sector.id;
+        if(!dir.child("sectors").child(key + ".msav").exists()) return null;
+        Fi file = dir.child("info").child(key + ".json");
+        if(!file.exists()) return null;
+
+        try{
+            SectorInfo info = JsonIO.read(SectorInfo.class, file.readString());
+            return info != null && info.hasCore ? info : null;
+        }catch(Throwable t){
+            return null;
+        }
+    }
+
+    private static boolean hasBase(@Nullable Planet planet){
+        if(planet == null || campaignPath == null) return false;
+
+        Fi dir = Core.files.absolute(campaignPath);
+        Fi infoDir = dir.child("info");
+        if(!infoDir.exists()) return false;
+
+        for(Fi file : infoDir.list()){
+            if(!file.extension().equals("json")) continue;
+
+            String name = file.nameWithoutExtension();
+            int split = name.lastIndexOf('-');
+            if(split <= 0 || !name.substring(0, split).equals(planet.name)) continue;
+            if(!dir.child("sectors").child(name + ".msav").exists()) continue;
+
+            try{
+                SectorInfo info = JsonIO.read(SectorInfo.class, file.readString());
+                if(info != null && info.hasCore) return true;
+            }catch(Throwable ignored){
+            }
+        }
+        return false;
     }
 
     private static class Stock{

@@ -18,7 +18,7 @@ $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $ReleaseApi = "https://api.github.com/repos/gghanera/mp-sectors/releases/latest"
-$FallbackZip = "https://github.com/gghanera/mp-sectors/releases/download/v2.5.0/MP-Sectors-2.5.0.zip"
+$FallbackZip = "https://github.com/gghanera/mp-sectors/releases/download/v2.5.1/MP-Sectors-2.5.1.zip"
 
 function Write-Step($text){
     Write-Host ""

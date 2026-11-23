@@ -259,6 +259,15 @@ public class AnyResearchMod extends Mod{
 
     private static boolean objectivesMet(TechNode node){
         for(Objective o : node.objectives){
+            //the coordinator checks sector/planet objectives against the campaign files:
+            //a dedicated server has no SaveSlot, so the local Sector cannot answer them
+            if(Vars.headless && (o instanceof Objectives.SectorComplete
+                || o instanceof Objectives.OnSector
+                || o instanceof Objectives.OnPlanet)){
+                //on a dedicated server the coordinator checks these against campaign files;
+                //a normal hosted game still has SaveSlots and keeps the vanilla rules
+                continue;
+            }
             if(!o.complete()) return false;
         }
         return true;
