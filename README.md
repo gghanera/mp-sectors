@@ -28,7 +28,7 @@ from the official Anuken/Mindustry releases.
 - **PowerShell 7** (`pwsh`).
 - **JDK 17 or newer** on the server. The Steam-bundled JRE is trimmed and cannot run a
   dedicated server; the launcher looks for `JAVA_HOME` or `java` in `PATH`.
-- Mindustry **build 160.x** (the mods target 160; min game version 160).
+- Mindustry **build 160.8** (the mods target 160; min game version 160).
 - For remote play: **Radmin VPN / ZeroTier / Tailscale**, or port forwarding. Steam
   networking is experimental and disabled by default.
 
@@ -296,6 +296,9 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   starting sector (Ground Zero on Serpulo) with all sector saves reset; the home can be attacked
   and has enemy waves; losing the home resets it to the starting sector; `home.json` is honoured
   only while its save exists, so imported saves no longer become the home automatically.
+- **2.5.3** (server 0.7.3, client 2.5.2, any-research 1.0.2): builds and tests target Mindustry
+  **160.8**; `fetch.ps1` defaults to v160.8; all three mods were rebuilt against the new client
+  and server jars. No gameplay changes.
 
 ### Co-op tools (2.3.0)
 
@@ -438,7 +441,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.5.2     # dist\MP-Sectors-2.5.2.zip
+.\package.ps1 -Version 2.5.3     # dist\MP-Sectors-2.5.3.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

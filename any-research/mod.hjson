@@ -11,7 +11,7 @@ main: "anyresearch.AnyResearchMod"
 
 description: "Lets every player who has this mod research tech tree nodes on a server, not only the host. Marked hidden so vanilla clients can still join you, and you can join vanilla servers. Players without the mod cannot research."
 
-version: "1.0.1"
+version: "1.0.2"
 
 #minimum game build required
 minGameVersion: 160
