@@ -362,6 +362,7 @@ public class Coordinator{
         homePlayerNames = names;
 
         instances.tick();
+        if(!restoring && home != null && home.loaded) home.checkCapture();
 
         long now = System.currentTimeMillis();
         checkAttacks(now);

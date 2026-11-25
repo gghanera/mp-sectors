@@ -302,6 +302,11 @@ The HTTP API still has no token, so the panel is meant for a trusted network
 - **2.5.4** (server 0.7.4, client 2.5.2, any-research 1.0.2): `unlocks.json` is now authoritative for
   the process's in-memory tech flags too: after a reset to `[]` the server relocks all research
   (core gates false) instead of keeping content unlocked from the save. Items/liquids stay usable.
+- **2.5.5** (server 0.7.5, client 2.5.2, any-research 1.0.3): research costs are charged in full
+  from the live core (stale host progress and the team item pool no longer make them free), and
+  `SectorRunner.save()` refreshes `SectorInfo` from the core so spent items persist. Ground Zero
+  now counts as completed only after its capture wave (10) is survived; the home stays endless
+  and attackable. Guests defer sector objectives to the server.
 
 ### Co-op tools (2.3.0)
 
@@ -444,7 +449,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.5.4     # dist\MP-Sectors-2.5.4.zip
+.\package.ps1 -Version 2.5.5     # dist\MP-Sectors-2.5.5.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

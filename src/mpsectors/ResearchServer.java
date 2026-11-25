@@ -128,7 +128,9 @@ public class ResearchServer{
             Sector sector = done.preset == null ? null : done.preset.sector;
             SectorInfo info = baseInfo(sector);
             if(info == null) return false;
-            return sector.id == sector.planet.startSector || (!info.waves && !info.attack);
+            //the endless lobby counts only after its vanilla capture wave was survived
+            if(sector.id == sector.planet.startSector) return info.wasCaptured;
+            return info.wasCaptured || (!info.waves && !info.attack);
         }
         if(objective instanceof Objectives.OnPlanet on){
             return hasBase(on.planet);
@@ -234,6 +236,7 @@ public class ResearchServer{
         Sector current = Vars.state.isCampaign() ? Vars.state.getSector() : null;
         boolean currentOnPlanet = current != null && current.planet == planet;
         int currentId = currentOnPlanet ? current.id : -1;
+        var currentCore = currentOnPlanet ? Vars.state.rules.defaultTeam.core() : null;
 
         Stock stock = loadStock(planet);
 
@@ -242,10 +245,11 @@ public class ResearchServer{
 
         for(int i = 0; i < node.requirements.length; i++){
             ItemStack requirement = node.requirements[i];
-            owed[i] = Math.max(requirement.amount - node.finishedRequirements[i].amount, 0);
+            //the dedicated server has no host stock dialog: always charge the full cost
+            owed[i] = Math.max(requirement.amount, 0);
             if(owed[i] == 0) continue;
 
-            int have = stock(stock, current, currentOnPlanet, currentId, requirement.item);
+            int have = stock(stock, currentCore, currentOnPlanet, currentId, requirement.item);
             if(have < owed[i]) missing.add(label(requirement.item) + " " + have + "/" + owed[i]);
         }
 
@@ -276,11 +280,12 @@ public class ResearchServer{
                 }
             }
 
-            //then the sector being played
-            if(remaining > 0 && currentOnPlanet){
-                int take = Math.min(Math.max(current.items().get(requirement.item), 0), remaining);
+            //then the core of the sector being played (Sector.items() is the team pool,
+            //not the core storage on a dedicated server)
+            if(remaining > 0 && currentCore != null){
+                int take = Math.min(Math.max(currentCore.items.get(requirement.item), 0), remaining);
                 if(take > 0){
-                    current.removeItem(requirement.item, take);
+                    currentCore.items.remove(requirement.item, take);
                     remaining -= take;
                 }
             }
@@ -303,7 +308,8 @@ public class ResearchServer{
         return String.join(", ", spent);
     }
 
-    private static int stock(Stock stock, Sector current, boolean currentOnPlanet, int currentId, Item item){
+    private static int stock(Stock stock, @Nullable mindustry.world.blocks.storage.CoreBlock.CoreBuild currentCore,
+                             boolean currentOnPlanet, int currentId, Item item){
         int total = 0;
 
         for(Integer id : stock.bases){
@@ -311,8 +317,8 @@ public class ResearchServer{
             total += Math.max(stock.infos.get(id).items.get(item), 0);
         }
 
-        if(currentOnPlanet){
-            total += Math.max(current.items().get(item), 0);
+        if(currentOnPlanet && currentCore != null){
+            total += Math.max(currentCore.items.get(item), 0);
         }
 
         return total;

@@ -426,6 +426,30 @@ public class SectorRunner{
         });
     }
 
+    /**
+     * The start sector stays endless (so it can keep being attacked), but it should still count
+     * as captured for the tech tree once the vanilla capture wave is reached.
+     */
+    public synchronized void checkCapture(){
+        if(!loaded || Vars.state == null || Vars.state.rules == null || !Vars.state.isCampaign()) return;
+
+        Sector sector = sector();
+        if(sector == null || sector.info == null || sector.info.wasCaptured) return;
+        if(sector.id != sector.planet.startSector || sector.preset == null || sector.preset.captureWave <= 0) return;
+        if(Vars.state.wave < sector.preset.captureWave) return;
+
+        sector.info.wasCaptured = true;
+        withCampaignLock(campaignInfo.parent().parent(), () -> {
+            try{
+                campaignInfo.parent().mkdirs();
+                writeAtomic(campaignInfo, JsonIO.write(sector.info));
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not mark start sector @ as captured", sectorName, t);
+            }
+        });
+        Log.info("[mp-sectors] start sector @ captured at wave @ (waves stay endless)", sectorName, Vars.state.wave);
+    }
+
     public synchronized void save(){
         if(!loaded) return;
 
@@ -435,6 +459,10 @@ public class SectorRunner{
         try{
             //write the process-local save first; campaign files stay untouched until it is complete
             SaveIO.save(localSave);
+
+            //the live core is authoritative: without prepare() the campaign info keeps the
+            //items from the last load, so research/launch costs look unspent on the next load
+            sector.info.prepare(sector);
 
             withCampaignLock(campaignSave.parent().parent(), () -> {
                 try{
