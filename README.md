@@ -299,6 +299,9 @@ The HTTP API still has no token, so the panel is meant for a trusted network
 - **2.5.3** (server 0.7.3, client 2.5.2, any-research 1.0.2): builds and tests target Mindustry
   **160.8**; `fetch.ps1` defaults to v160.8; all three mods were rebuilt against the new client
   and server jars. No gameplay changes.
+- **2.5.4** (server 0.7.4, client 2.5.2, any-research 1.0.2): `unlocks.json` is now authoritative for
+  the process's in-memory tech flags too: after a reset to `[]` the server relocks all research
+  (core gates false) instead of keeping content unlocked from the save. Items/liquids stay usable.
 
 ### Co-op tools (2.3.0)
 
@@ -441,7 +444,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.5.3     # dist\MP-Sectors-2.5.3.zip
+.\package.ps1 -Version 2.5.4     # dist\MP-Sectors-2.5.4.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

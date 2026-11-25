@@ -489,6 +489,10 @@ public class SectorRunner{
             }
         }
 
+        //the process may have unlocked content from the save/previous campaign; make the
+        //in-memory tech flags match unlocks.json (empty file = all tech locked)
+        if(fileExists) relockTechTo(unlocksFile);
+
         int unlocked = 0;
         for(String name : names){
             MappableContent content = Vars.content.byName(name);
@@ -515,6 +519,15 @@ public class SectorRunner{
      * merge those stale unlocks back into the restored campaign.
      */
     public static void relockTo(Fi file){
+        relock(file, false);
+    }
+
+    /** Relocks tech content but keeps items/liquids usable (resources in old saves stay usable). */
+    public static void relockTechTo(Fi file){
+        relock(file, true);
+    }
+
+    private static void relock(Fi file, boolean keepResources){
         ObjectSet<String> names = new ObjectSet<>();
 
         if(file != null && file.exists()){
@@ -544,6 +557,7 @@ public class SectorRunner{
         for(ContentType type : ContentType.all){
             for(Content content : Vars.content.getBy(type)){
                 if(!(content instanceof UnlockableContent u) || u.alwaysUnlocked || names.contains(u.name)) continue;
+                if(keepResources && (u instanceof Item || u instanceof mindustry.type.Liquid)) continue;
 
                 try{
                     if(u.unlocked()){
@@ -559,7 +573,7 @@ public class SectorRunner{
         if(locked > 0){
             //persist the relock: content reads name-unlocked from settings on the next start
             Core.settings.forceSave();
-            Log.info("[mp-sectors] relocked @ research entries after restore", locked);
+            Log.info("[mp-sectors] relocked @ research entries", locked);
         }
     }
 
