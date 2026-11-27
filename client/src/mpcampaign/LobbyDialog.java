@@ -628,7 +628,13 @@ public class LobbyDialog extends PlanetDialog{
     private void editUrl(){
         Vars.ui.showTextInput("Адрес координатора", "http://host:8090", 100, MpCampaignMod.url(), value -> {
             MpCampaignMod.url(value);
-            MpCampaignMod.refresh(null);
+            //remote campaigns with httpToken need the same token here; empty keeps trusted-LAN.
+            //allowEmpty + closed: an empty token must be confirmable and cancelling must refresh too
+            Vars.ui.showTextInput("Токен координатора", "пусто, если токен не задан", 200,
+                Core.settings.getString("mpcampaign-token", ""), false, true, token -> {
+                    Core.settings.put("mpcampaign-token", token == null ? "" : token.trim());
+                    MpCampaignMod.refresh(null);
+                }, () -> MpCampaignMod.refresh(null));
         });
     }
 

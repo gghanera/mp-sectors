@@ -299,6 +299,12 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   research from running bases no longer refunded; Ground Zero/Onset capture semantics; standalone
   any-research objectives; client map pause, ban-hours, refresh races, launcher pid/readiness/JRE;
   `fetch.ps1` partial downloads and instance cleanup; docs aligned.
+- **2.5.7 — follow-up review fixes** (server 0.7.7, client 2.5.7, any-research 1.0.4): landing checks
+  and charges the source core in one atomic step (two simultaneous landings cannot both go free);
+  accelerator cargo from a running sector is forwarded to the destination instead of being cleared;
+  the stop wait is 300 s (the coordinator's 180 s instance budget plus the home save); `checkPid` rejects the game client
+  and verifies the pid file start time; the installer sorts zip names by version; a coordinator
+  token can be entered next to the manual URL and is forwarded to instances from config or env.
 - **2.5.2** (server 0.7.2, client unchanged 2.5.1): a new company always starts at the planet's
   starting sector (Ground Zero on Serpulo) with all sector saves reset; the home can be attacked
   and has enemy waves; losing the home resets it to the starting sector; `home.json` is honoured
@@ -456,7 +462,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.5.6     # dist\MP-Sectors-2.5.6.zip
+.\package.ps1 -Version 2.5.7     # dist\MP-Sectors-2.5.7.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

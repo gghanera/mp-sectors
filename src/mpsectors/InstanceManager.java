@@ -249,7 +249,7 @@ public class InstanceManager{
     }
 
     /** Waits for a stopping instance of the same sector, then reserves. */
-    public synchronized Reservation reserveWaiting(String sector, boolean ignorePlayerLimit){
+    public Reservation reserveWaiting(String sector, boolean ignorePlayerLimit){
         long deadline = System.currentTimeMillis() + 45_000L;
 
         while(true){
@@ -311,7 +311,7 @@ public class InstanceManager{
             cfg.steam = config.steam;
             cfg.steamJar = config.steamJar;
             cfg.steamNative = config.steamNative;
-            cfg.httpToken = config.httpToken == null ? "" : config.httpToken;
+            cfg.httpToken = Coordinator.effectiveToken(config);
 
             if(config.steam && config.steamJar != null && !config.steamJar.isEmpty()){
                 dir.child("steam_appid.txt").writeString("1127400");

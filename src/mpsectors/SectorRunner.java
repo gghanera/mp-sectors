@@ -426,15 +426,23 @@ public class SectorRunner{
         }
     }
 
-    /** Removes launch cost (the loadout requirements) from the current core. */
-    public void deduct(String cost){
-        if(cost == null || cost.isEmpty()) return;
+    /** Removes launch cost (the loadout requirements) from the current core; false when it cannot pay. */
+    public boolean deduct(String cost){
+        if(cost == null || cost.isEmpty()) return true;
 
         var core = Vars.state.rules.defaultTeam.core();
-        if(core == null) return;
+        if(core == null) return false;
 
-        parseItems(cost).each((item, amount) -> core.items.remove(item, Math.min(core.items.get(item), amount)));
+        ItemSeq need = parseItems(cost);
+        final boolean[] ok = {true};
+        need.each((item, amount) -> {
+            if(core.items.get(item) < amount) ok[0] = false;
+        });
+        if(!ok[0]) return false;
+
+        need.each((item, amount) -> core.items.remove(item, amount));
         Log.info("[mp-sectors] launch cost @ taken from @", cost, sectorName);
+        return true;
     }
 
     /** Delivers accelerator cargo to a sector that already had a base (its save ignores the loadout). */
@@ -456,16 +464,40 @@ public class SectorRunner{
         Log.info("[mp-sectors] accelerator cargo delivered to @: @", sectorName, items);
     }
 
-    /** Consumes the interplanetary accelerator: every stored item, battery power and progress. */
-    public void consumeAccelerator(int x, int y){
+    /**
+     * Verifies, empties and returns the accelerator leftovers in one step. Null means the tile is
+     * not a ready accelerator or does not hold the core requirements; nothing is consumed then.
+     */
+    public String takeAccelerator(int x, int y, String requirements){
         var build = Vars.world.build(x, y);
-        if(!(build instanceof Accelerator.AcceleratorBuild acc)) return;
+        if(!(build instanceof Accelerator.AcceleratorBuild acc)) return null;
+        if(acc.progress < 1f && acc.items.total() <= 0) return null;
 
-        //vanilla moves everything in the accelerator to the launched core; the requirements are the cost
+        ItemSeq cargo = new ItemSeq();
+        acc.items.each(cargo::add);
+
+        //vanilla moves everything in the accelerator to the launched core; the core requirements
+        //are spent on the new core, the rest is cargo
+        ItemSeq need = parseItems(requirements);
+        if(need.total > 0 && !cargo.has(need)) return null;
+        need.each(cargo::remove);
+
         acc.items.clear();
         acc.power.graph.useBatteries(((Accelerator)acc.block).powerBufferRequirement);
         acc.progress = 0f;
         Log.info("[mp-sectors] accelerator consumed in @", sectorName);
+        return itemList(cargo);
+    }
+
+    private static String itemList(ItemSeq seq){
+        StringBuilder out = new StringBuilder();
+        seq.each((item, amount) -> {
+            if(amount > 0){
+                if(out.length() > 0) out.append(',');
+                out.append(item.name).append(':').append(amount);
+            }
+        });
+        return out.toString();
     }
 
     private static ItemSeq parseItems(String list){

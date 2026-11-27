@@ -1132,7 +1132,8 @@ public class MpSectorsMod extends Mod{
                     if(req == null || req.time <= 0 || now - req.time > 120_000L){
                         file.delete();
                     }else if(runner.sectorName.equals(req.sector)){
-                        if(req.cost != null && !req.cost.isEmpty()) runner.deduct(req.cost);
+                        boolean ok = req.cost == null || req.cost.isEmpty() || runner.deduct(req.cost);
+                        writeResult(dir, "launch", req.id, ok, "");
                         file.delete();
                     }
                 }else if(name.startsWith("accelerator-")){
@@ -1140,7 +1141,17 @@ public class MpSectorsMod extends Mod{
                     if(req == null || req.time <= 0 || now - req.time > 120_000L){
                         file.delete();
                     }else if(runner.sectorName.equals(req.sector)){
-                        if(req.x >= 0 && req.y >= 0) runner.consumeAccelerator(req.x, req.y);
+                        String cargo = req.x >= 0 && req.y >= 0
+                            ? runner.takeAccelerator(req.x, req.y, req.requirements) : null;
+                        writeResult(dir, "accelerator", req.id, cargo != null, cargo == null ? "" : cargo);
+                        file.delete();
+                    }
+                }else if(name.startsWith("cargo-")){
+                    Coordinator.CargoRequest req = JsonIO.read(Coordinator.CargoRequest.class, file.readString());
+                    if(req == null || req.time <= 0 || now - req.time > 120_000L){
+                        file.delete();
+                    }else if(runner.sectorName.equals(req.sector)){
+                        runner.addCargo(req.value);
                         file.delete();
                     }
                 }else if(name.startsWith("command-")){
@@ -1166,6 +1177,18 @@ public class MpSectorsMod extends Mod{
                 Log.err("[mp-sectors] could not read @", file.name(), t);
                 file.delete();
             }
+        }
+    }
+
+    private void writeResult(Fi dir, String kind, String id, boolean ok, String cargo){
+        if(id == null || id.isEmpty()) return;
+        try{
+            Coordinator.RequestResult out = new Coordinator.RequestResult();
+            out.ok = ok;
+            out.cargo = cargo == null ? "" : cargo;
+            SectorRunner.writeAtomic(dir.child("result-" + kind + "-" + id + ".json"), JsonIO.write(out));
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not write @ result", kind, t);
         }
     }
 

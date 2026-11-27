@@ -393,7 +393,7 @@ switch($Action){
         Set-Content -Path (Join-Path $dir "stop.flag") -Value "stop" -Encoding utf8
         Write-Host "asking coordinator to save and stop ..."
 
-        $deadline = (Get-Date).AddSeconds(90)
+        $deadline = (Get-Date).AddSeconds(300)
         while((Get-Date) -lt $deadline){
             Start-Sleep -Milliseconds 500
             if($coordPid -gt 0){

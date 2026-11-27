@@ -1,7 +1,7 @@
 # Builds a distributable zip: server, mods, scripts and docs.
 # Run the three build scripts first (or let the launcher build the server mod).
 param(
-    [string]$Version = "2.5.6"
+    [string]$Version = "2.5.7"
 )
 
 $ErrorActionPreference = "Stop"
@@ -69,4 +69,3 @@ Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
 Remove-Item -Recurse -Force $stage
 
 Write-Host "built: $zip"
-

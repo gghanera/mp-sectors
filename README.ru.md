@@ -43,7 +43,7 @@ MP-Sectors/
 Steam-сборка Mindustry портативная: данные лежат не в `%APPDATA%`, а в
 `...\steamapps\common\Mindustry\saves\`.
 
-- моды: `...\saves\mods\` — `mp-campaign.jar` (2.5.6) и `any-research.jar`;
+- моды: `...\saves\mods\` — `mp-campaign.jar` (2.5.7) и `any-research.jar`;
 - кампания: `...\saves\saves\` и `...\saves\settings.bin`.
 
 Кампания из Steam переносится в `campaign/` (87 секторов Serpulo/Erekir, исследования и
@@ -364,6 +364,12 @@ handshake (сервер видит TCP-подключение, но не пол�
   pool, анти-спуфинг чата, daily snapshots по компаниям, refund исследований из живых баз,
   capture Ground Zero/Onset, standalone any-research, пауза карты/ban-hours/refresh races,
   pid/readiness/JRE лаунчера, partial fetch и stale instances; доки синхронизированы.
+- **2.5.7 — доработки по ревью** (сервер 0.7.7, клиент 2.5.7, any-research 1.0.4): проверка и
+  списание стоимости высадки идут одним атомарным шагом (две одновременные высадки больше не
+  проходят бесплатно); груз ускорителя из работающего сектора передаётся в целевой, а не стирается;
+  ожидание остановки 300 с (бюджет координатора 180 с плюс запас на сейв дома); `checkPid` не принимает клиент игры и
+  сверяет время старта с `coordinator.pid`; установщик сортирует архивы по версии; токен
+  координатора вводится рядом с ручным URL и передаётся инстансам из конфига или env.
 
 ### Новое в 2.3.0
 
@@ -510,7 +516,7 @@ cd ..\any-research
 Собрать архив для игроков (моды + скрипты + документация):
 
 ```powershell
-.\package.ps1 -Version 2.5.6     # dist\MP-Sectors-2.5.6.zip
+.\package.ps1 -Version 2.5.7     # dist\MP-Sectors-2.5.7.zip
 ```
 
 Проверить админ-API (запускает временный координатор на копии кампании):

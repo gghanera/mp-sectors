@@ -129,13 +129,30 @@ public class Coordinator{
     public static class LaunchDeduct{
         public String sector = "";
         public String cost = "";
+        /** Round-trip id: the instance writes result-launch-<id>.json after charging the core. */
+        public String id = "";
         public long time;
     }
 
     public static class AcceleratorRequest{
         public String sector = "";
         public int x = -1, y = -1;
+        /** Core requirements the accelerator must hold; they are spent, the rest is cargo. */
+        public String requirements = "";
+        public String id = "";
         public long time;
+    }
+
+    public static class CargoRequest{
+        public String sector = "";
+        public String value = "";
+        public long time;
+    }
+
+    /** Result of a coordinator request that needs an answer from an instance. */
+    public static class RequestResult{
+        public boolean ok;
+        public String cargo = "";
     }
 
     public static class RestoreRequest{
@@ -2440,7 +2457,12 @@ public class Coordinator{
 
     /** The configured token, or MP_SECTORS_HTTP_TOKEN (the launcher rewrites mp-coordinator.json). */
     private String httpToken(){
-        if(config.httpToken != null && !config.httpToken.isEmpty()) return config.httpToken;
+        return effectiveToken(config);
+    }
+
+    /** The token every process in this campaign has to send; empty means a trusted LAN. */
+    public static String effectiveToken(Config config){
+        if(config != null && config.httpToken != null && !config.httpToken.isEmpty()) return config.httpToken;
         String env = System.getenv("MP_SECTORS_HTTP_TOKEN");
         return env == null ? "" : env;
     }
@@ -2640,9 +2662,13 @@ public class Coordinator{
                 out.error = "Не удалось прочитать схему ядра.";
                 return landJson(out);
             }
-            if(!homeAccelerator && !sourceCanPay(sourceKey, cost, snap)){
-                out.error = "Недостаточно ресурсов для запуска.";
-                return landJson(out);
+            //a stopped source cannot answer the consume request; fail now instead of waiting 20 s
+            if(!homeAccelerator){
+                InstanceManager.Instance src = sourceKey == null ? null : instances.get(sourceKey);
+                if(src == null || src.stopping){
+                    out.error = "Исходный сектор не запущен: вернитесь в него и повторите.";
+                    return landJson(out);
+                }
             }
         }else if(!targetHasBase){
             //a new sector must be launched with a core schematic; otherwise it would be free
@@ -2680,21 +2706,6 @@ public class Coordinator{
             }
         }
 
-        //cargo the accelerator itself carries, minus the core requirements; verified on the home
-        String acceleratorCargo = null;
-        if(req.accelerator){
-            if(homeAccelerator){
-                acceleratorCargo = homeAcceleratorCargo(req.tileX, req.tileY, cost);
-                if(acceleratorCargo == null){
-                    out.error = "Ускоритель не найден или ещё не готов.";
-                    return landJson(out);
-                }
-            }else{
-                //the instance consumes its own accelerator; client cargo is never trusted
-                acceleratorCargo = "";
-            }
-        }
-
         //req.accelerator is only true here after the source accelerator was verified above
         if(!allowed(sector, snap, req.accelerator)){
             out.error = "Этот сектор ещё не открыт.";
@@ -2711,15 +2722,19 @@ public class Coordinator{
             }
 
             if(req.accelerator){
-                consumeAcceleratorSource(sourceKey, req, homeAccelerator);
-                String items = acceleratorCargo;
-                if(items != null && !items.isEmpty()){
+                String cargo = takeAcceleratorCargo(sourceKey, req, cost, homeAccelerator);
+                if(cargo == null){
+                    out.error = "Ускоритель не найден или ещё не готов.";
+                    return landJson(out);
+                }
+                if(!cargo.isEmpty()){
                     Core.app.post(() -> {
-                        if(home != null && home.loaded) home.addCargo(items);
+                        if(home != null && home.loaded) home.addCargo(cargo);
                     });
                 }
-            }else if(!empty(cost)){
-                deductLaunch(sourceKey, itemsString(cost));
+            }else if(!empty(cost) && !deductLaunch(sourceKey, cost)){
+                out.error = "Не удалось списать стоимость запуска.";
+                return landJson(out);
             }
 
             out.ok = true;
@@ -2732,21 +2747,45 @@ public class Coordinator{
         }
 
         InstanceManager.Instance inst;
-        boolean startedWithAcceleratorCargo = false;
         InstanceManager.Reservation reservation = instances.reserveWaiting(key, isOnline(req.player));
         if(reservation == null){
             out.error = "Места заняты: уже загружено " + config.maxSectors + " секторов или на сервере "
                 + config.maxPlayers + " игроков.";
             return landJson(out);
         }
+
+        //charge before the sector boots and refund if the boot fails: checking a snapshot and
+        //deducting later let two concurrent landings both pass and one of them go uncharged
+        String acceleratorCargo = null;
+        String charged = "";
+        boolean startedWithAcceleratorCargo = false;
+        long saveBefore = saveMtime(key);
+        boolean booted = false;
         try{
+            if(req.accelerator){
+                acceleratorCargo = takeAcceleratorCargo(sourceKey, req, cost, homeAccelerator);
+                if(acceleratorCargo == null){
+                    out.error = "Ускоритель не найден или ещё не готов.";
+                    return landJson(out);
+                }
+                charged = itemsString(cost);
+            }else if(!empty(cost)){
+                if(!deductLaunch(sourceKey, cost)){
+                    out.error = "Не удалось списать стоимость запуска.";
+                    return landJson(out);
+                }
+                charged = itemsString(cost);
+            }
+
             inst = reservation.instance;
             if(inst == null){
                 //for an accelerator launch the sector starts with only the verified cargo, never
                 //with the client-supplied amount
                 String resources = req.accelerator ? acceleratorCargo : req.resources;
+                booted = true;
                 inst = instances.start(reservation, req.loadout, resources);
                 if(inst == null){
+                    refundFailedLaunch(key, booted, saveBefore, req.accelerator ? mergeItems(acceleratorCargo, charged) : charged);
                     out.error = "Не удалось запустить сектор.";
                     return landJson(out);
                 }
@@ -2757,6 +2796,7 @@ public class Coordinator{
             if(!inst.ready){
                 inst = instances.waitReady(inst, 45_000L);
                 if(inst == null){
+                    refundFailedLaunch(key, booted, saveBefore, req.accelerator ? mergeItems(acceleratorCargo, charged) : charged);
                     out.error = "Не удалось запустить сектор.";
                     return landJson(out);
                 }
@@ -2764,6 +2804,7 @@ public class Coordinator{
 
             //an admin may have stopped this sector while another player was landing
             if(inst.stopping){
+                refundFailedLaunch(key, booted, saveBefore, req.accelerator ? mergeItems(acceleratorCargo, charged) : charged);
                 out.error = "Сектор останавливается, попробуйте ещё раз.";
                 return landJson(out);
             }
@@ -2771,16 +2812,11 @@ public class Coordinator{
             instances.release(reservation);
         }
 
-        if(req.accelerator){
-            consumeAcceleratorSource(sourceKey, req, homeAccelerator);
-            //a newly generated sector already received the verified cargo in start(); an
-            //existing base ignores the launch resources, so the live core needs the command
-            if(acceleratorCargo != null && !acceleratorCargo.isEmpty()
-                && (!startedWithAcceleratorCargo || targetHasBase)){
-                command(inst.sector, "cargo", acceleratorCargo);
-            }
-        }else if(!empty(cost)){
-            deductLaunch(sourceKey, itemsString(cost));
+        //a newly generated sector already received the cargo in start(); an existing base keeps
+        //its save, so its live core needs the delivery
+        if(req.accelerator && acceleratorCargo != null && !acceleratorCargo.isEmpty()
+            && (!startedWithAcceleratorCargo || targetHasBase)){
+            deliverCargo(inst.sector, acceleratorCargo);
         }
 
         notifyEvent("land", key, req.player, "Высадка в сектор");
@@ -2885,52 +2921,122 @@ public class Coordinator{
     }
 
     /**
-     * Reads the verified accelerator cargo on the game thread: its items minus the core
-     * requirements. Null means the tile is not a ready accelerator.
+     * Empties the verified accelerator and returns its cargo minus the core requirements.
+     * Null means the tile is not a ready accelerator holding the requirements; nothing is
+     * consumed in that case, so the race of reading and clearing it in separate steps is gone.
      */
-    private String homeAcceleratorCargo(int x, int y, ItemSeq requirements){
-        return onGameThread(() -> {
-            if(home == null || !home.loaded || Vars.world == null) return null;
+    private String takeAcceleratorCargo(String sourceKey, LandRequest req, ItemSeq requirements, boolean homeAccelerator){
+        String need = itemsString(requirements == null ? new ItemSeq() : requirements);
 
-            var build = Vars.world.build(x, y);
-            if(!(build instanceof Accelerator.AcceleratorBuild acc)) return null;
-            if(acc.progress < 1f && acc.items.total() <= 0) return null;
-
-            ItemSeq cargo = new ItemSeq();
-            acc.items.each(cargo::add);
-            //a ready accelerator must actually carry the core requirements; otherwise the
-            //destination core would be built for free
-            if(requirements != null && !cargo.has(requirements)) return null;
-            if(requirements != null) requirements.each((item, amount) -> cargo.remove(item, amount));
-            return itemsString(cargo);
-        }, 10_000L);
-    }
-
-    private void consumeHomeAccelerator(int x, int y){
-        Core.app.post(() -> {
-            if(home != null && home.loaded) home.consumeAccelerator(x, y);
-        });
-    }
-
-    private void consumeAcceleratorSource(String sourceKey, LandRequest req, boolean homeAccelerator){
         if(homeAccelerator){
-            consumeHomeAccelerator(req.tileX, req.tileY);
-        }else if(sourceKey != null && req.fromId >= 0){
-            writeRequest("accelerator", "{\"sector\":\"" + esc(sourceKey) + "\",\"x\":" + req.tileX
-                + ",\"y\":" + req.tileY + ",\"time\":" + System.currentTimeMillis() + "}");
+            return onGameThread(() -> {
+                if(home == null || !home.loaded) return null;
+                return home.takeAccelerator(req.tileX, req.tileY, need);
+            });
         }
+        if(sourceKey == null) return null;
+
+        String id = Long.toHexString(System.nanoTime());
+        writeRequest("accelerator", "{\"sector\":\"" + esc(sourceKey) + "\",\"x\":" + req.tileX
+            + ",\"y\":" + req.tileY + ",\"requirements\":\"" + esc(need) + "\",\"id\":\"" + id
+            + "\",\"time\":" + System.currentTimeMillis() + "}");
+        RequestResult result = waitResult("accelerator", id, 20_000L);
+        return result == null || !result.ok ? null : result.cargo;
     }
 
-    /** Removes the loadout cost from the launch source: live for the home, via a request file for instances. */
-    private void deductLaunch(String fromKey, String cost){
-        if(fromKey == null || cost == null || cost.isEmpty()) return;
+    /**
+     * Charges the launch source before the sector boots. The home is charged on the game thread;
+     * an instance charges its live core and answers through a result file, so the check and the
+     * deduction are one atomic step and two concurrent landings cannot both pass.
+     */
+    private boolean deductLaunch(String fromKey, ItemSeq cost){
+        if(fromKey == null || empty(cost)) return true;
+        String items = itemsString(cost);
+
         if(fromKey.equals(homeSector)){
+            Boolean ok = onGameThread(() -> {
+                if(home == null || !home.loaded) return false;
+                return home.deduct(items);
+            });
+            return Boolean.TRUE.equals(ok);
+        }
+
+        String id = Long.toHexString(System.nanoTime());
+        writeRequest("launch", "{\"sector\":\"" + esc(fromKey) + "\",\"cost\":\"" + esc(items)
+            + "\",\"id\":\"" + id + "\",\"time\":" + System.currentTimeMillis() + "}");
+        RequestResult result = waitResult("launch", id, 20_000L);
+        return result != null && result.ok;
+    }
+
+    /** Returns charged resources to the launch source when the destination failed to boot. */
+    private void refundLaunch(String key, String items){
+        deliverCargo(key, items);
+    }
+
+    /**
+     * The starter publishes the new save before status.json exists, so a boot timeout does not
+     * prove the destination is absent: refunding then would duplicate the resources. Only a
+     * sector save written by this attempt counts - a boot that loads from an existing save
+     * rewrites its info but not the save, and a joined launch was booted by another request.
+     */
+    private void refundFailedLaunch(String key, boolean booted, long saveBefore, String items){
+        if(booted && saveMtime(key) > saveBefore){
+            Log.info("[mp-sectors] launch of @ failed after its save was written; not refunding", key);
+            return;
+        }
+        refundLaunch(key, items);
+    }
+
+    private long saveMtime(String key){
+        Fi save = campaign.child("sectors").child(key + ".msav");
+        return save.exists() ? save.lastModified() : 0L;
+    }
+
+    private void deliverCargo(String sector, String items){
+        if(sector == null || items == null || items.isEmpty()) return;
+
+        if(sector.equals(homeSector)){
             Core.app.post(() -> {
-                if(home != null && home.loaded) home.deduct(cost);
+                if(home != null && home.loaded) home.addCargo(items);
             });
         }else{
-            writeRequest("launch", "{\"sector\":\"" + esc(fromKey) + "\",\"cost\":\"" + esc(cost) + "\",\"time\":" + System.currentTimeMillis() + "}");
+            writeRequest("cargo", "{\"sector\":\"" + esc(sector) + "\",\"value\":\"" + esc(items)
+                + "\",\"time\":" + System.currentTimeMillis() + "}");
         }
+    }
+
+    /** Waits for the result-KIND-ID.json file written by the target instance. */
+    private RequestResult waitResult(String kind, String id, long timeoutMs){
+        Fi file = campaign.child("requests").child("result-" + kind + "-" + id + ".json");
+        long deadline = System.currentTimeMillis() + timeoutMs;
+
+        while(System.currentTimeMillis() < deadline){
+            if(file.exists()){
+                try{
+                    RequestResult out = JsonIO.read(RequestResult.class, file.readString());
+                    file.delete();
+                    return out;
+                }catch(Throwable t){
+                    file.delete();
+                    return null;
+                }
+            }
+            try{
+                Thread.sleep(150);
+            }catch(InterruptedException e){
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
+
+        Log.err("[mp-sectors] @ request timed out", kind);
+        return null;
+    }
+
+    private static String mergeItems(String a, String b){
+        ItemSeq seq = parseItemSeq(a);
+        seq.add(parseItemSeq(b));
+        return itemsString(seq);
     }
 
     private static boolean empty(ItemSeq seq){
@@ -2988,6 +3094,42 @@ public class Coordinator{
             Thread.currentThread().interrupt();
             return null;
         }
+
+        @SuppressWarnings("unchecked")
+        T value = (T)result[0];
+        return value;
+    }
+
+    /**
+     * Same, without a timeout. Used for actions that must not run after the caller gave up: a
+     * late {@code home.deduct}/{@code takeAccelerator} would charge or empty the core while the
+     * landing already reported a failure.
+     */
+    private static <T> T onGameThread(Supplier<T> action){
+        CountDownLatch latch = new CountDownLatch(1);
+        final Object[] result = new Object[1];
+        Core.app.post(() -> {
+            try{
+                result[0] = action.get();
+            }catch(Throwable t){
+                Log.err("[mp-sectors] game-thread task failed", t);
+            }finally{
+                latch.countDown();
+            }
+        });
+
+        //keep waiting even if the executor interrupts us: returning early would let the task
+        //charge the core after /land already reported a failure
+        boolean interrupted = false;
+        while(true){
+            try{
+                latch.await();
+                break;
+            }catch(InterruptedException e){
+                interrupted = true;
+            }
+        }
+        if(interrupted) Thread.currentThread().interrupt();
 
         @SuppressWarnings("unchecked")
         T value = (T)result[0];

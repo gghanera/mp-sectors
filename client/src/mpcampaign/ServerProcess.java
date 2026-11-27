@@ -12,7 +12,9 @@ import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
+import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -204,9 +206,20 @@ public class ServerProcess{
     /** @return the pid when it is alive and looks like our coordinator, otherwise 0 (pid reuse). */
     private static long checkPid(long pid){
         if(pid <= 0) return 0;
+        //the game client itself is never the coordinator, and killing it would be fatal
+        if(pid == ProcessHandle.current().pid()) return 0;
 
         ProcessHandle handle = ProcessHandle.of(pid).orElse(null);
         if(handle == null || !handle.isAlive()) return 0;
+
+        //reject a reused pid even before looking at the command line: the process must have
+        //started when we wrote coordinator.pid
+        Fi pidFile = coordinatorDir().child("coordinator.pid");
+        Optional<Instant> started = handle.info().startInstant();
+        if(pidFile.exists() && started.isPresent()
+            && Math.abs(started.get().toEpochMilli() - pidFile.lastModified()) > 10_000L){
+            return 0;
+        }
 
         String command = handle.info().commandLine().orElse("").replace('\\', '/').toLowerCase();
         if(command.isEmpty()){
@@ -214,8 +227,9 @@ public class ServerProcess{
             return statusAnswers(setting("mpcampaign-http-port", 8090)) ? pid : 0;
         }
 
-        //reject a reused pid: the command must look like the coordinator we launched
-        if(command.contains("mindustry") || command.contains("server-release") || command.contains("serverlauncher")) return pid;
+        //reject a reused pid: the command must look like the coordinator we launched.
+        //"mindustry" alone is not enough - the game client itself matches it
+        if(command.contains("server-release") || command.contains("serverlauncher")) return pid;
         String jar = serverJar().absolutePath().replace('\\', '/').toLowerCase();
         return command.contains(jar) ? pid : 0;
     }
@@ -506,7 +520,9 @@ public class ServerProcess{
 
         Thread thread = new Thread(() -> {
             try{
-                for(int i = 0; i < 120 && isAlive(pid); i++){
+                //the coordinator gives its instances up to 180 s to save and stop, then saves the home;
+                //300 s leaves margin so a normal stop is never cut off by a force-kill mid-save
+                for(int i = 0; i < 1200 && isAlive(pid); i++){
                     Thread.sleep(250);
                 }
                 if(isAlive(pid)){
