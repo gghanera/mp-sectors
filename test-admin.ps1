@@ -103,7 +103,10 @@ try{
     }
     if(-not (Admin '{"player":"TestMod","action":"unban","name":"BannedGuy"}').ok){ Fail 'unban failed' }
 
-    #named companies: archive the current one, start a fresh campaign with the same research
+    #named companies: archive the current one, start a fresh campaign with no research
+    $originalUnlocks = '[]'
+    $originalFile = Join-Path $root 'campaign\unlocks.json'
+    if(Test-Path $originalFile){ $originalUnlocks = (Get-Content $originalFile -Raw).Trim() }
     $create = Admin '{"player":"TestMod","action":"companycreate","value":"TestCompany"}'
     if(-not $create.ok){ Fail ('company create failed: ' + $create.error) }
     $status = (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$HttpPort/status" -TimeoutSec 10).Content | ConvertFrom-Json
@@ -111,13 +114,24 @@ try{
     if($status.home -ne 'serpulo-170'){ Fail "new company home is '$($status.home)', expected serpulo-170" }
     $newSaves = @(Get-ChildItem (Join-Path $root 'campaign\sectors') -Filter '*.msav')
     if($newSaves.Count -ne 1){ Fail "new company kept $($newSaves.Count) sector saves; expected only the starting sector" }
-    if(-not (Test-Path (Join-Path $root 'campaign\unlocks.json'))){ Fail 'new company lost its research file' }
+    $newUnlocks = Join-Path $root 'campaign\unlocks.json'
+    if(-not (Test-Path $newUnlocks)){ Fail 'new company has no research file' }
+    $rawUnlocks = (Get-Content $newUnlocks -Raw).Trim()
+    if($rawUnlocks -ne '[]'){ Fail "new company inherited research: $rawUnlocks" }
+    $archivedUnlocks = Join-Path $root 'companies\Основная\unlocks.json'
+    if(-not (Test-Path $archivedUnlocks)){ Fail 'the old company lost its research file' }
+    $archivedRaw = (Get-Content $archivedUnlocks -Raw).Trim()
+    if($archivedRaw -ne $originalUnlocks){ Fail 'the old company research changed while archiving' }
     if(-not (Test-Path (Join-Path $root 'companies\Основная'))){ Fail 'the old company was not archived' }
 
     $back = Admin '{"player":"TestMod","action":"companyswitch","value":"Основная"}'
     if(-not $back.ok){ Fail ('company switch failed: ' + $back.error) }
     $status = (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$HttpPort/status" -TimeoutSec 10).Content | ConvertFrom-Json
     if($status.company -ne 'Основная'){ Fail 'company did not switch back' }
+    $restoredRaw = (Get-Content (Join-Path $root 'campaign\unlocks.json') -Raw).Trim()
+    $beforeSet = @(if($originalUnlocks -notin @('', '[]')){ $originalUnlocks | ConvertFrom-Json } else { @() })
+    $afterSet = @(if($restoredRaw -notin @('', '[]')){ $restoredRaw | ConvertFrom-Json } else { @() })
+    if(@(Compare-Object $beforeSet $afterSet).Count -ne 0){ Fail 'research was not restored after switching back' }
 
     Write-Host 'PASS: admin endpoint checks' -ForegroundColor Green
 }finally{

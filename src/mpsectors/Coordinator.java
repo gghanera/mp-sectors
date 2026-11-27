@@ -358,7 +358,8 @@ public class Coordinator{
 
             startHttp();
             started = true;
-            Log.info("[mp-sectors] coordinator ready: home=@ game=@ http=@ duplicates=@", homeSector, config.gamePort, config.httpPort, config.allowDuplicateClients ? "allowed" : "blocked");
+            Log.info("[mp-sectors] coordinator ready: home=@ game=@ http=@ duplicates=@ token=@", homeSector, config.gamePort, config.httpPort,
+                config.allowDuplicateClients ? "allowed" : "blocked", httpToken().isEmpty() ? "none" : "required");
         }catch(Throwable t){
             Log.err("[mp-sectors] coordinator failed to start", t);
         }
@@ -2058,17 +2059,17 @@ public class Coordinator{
             if(!saveHomeBlocking()) throw new IllegalStateException("не удалось сохранить домашний сектор");
             archiveCompany(company);
 
-            //a fresh campaign keeps research and the shared lists, but not sectors, chat or history
+            //a fresh company starts with no research: unlocks.json is the authoritative list,
+            //so an empty array (not the old one) is what the home relocks to after the swap
             Fi tmp = campaign.parent().child("campaign.new");
             tmp.deleteDirectory();
             tmp.mkdirs();
-            copyIfExists(campaign.child("unlocks.json"), tmp.child("unlocks.json"));
+            SectorRunner.writeAtomic(tmp.child("unlocks.json"), "[]");
             copyIfExists(campaign.child("moderators.json"), tmp.child("moderators.json"));
             copyIfExists(campaign.child("bans.json"), tmp.child("bans.json"));
 
-            //a new company starts at the vanilla starting sector of the current planet, not at
-            //the developed home sector the players happened to leave last
-            //a new company always starts at the starting sector, never at the previous home
+            //a new company always starts at the vanilla starting sector of the current planet,
+            //never at the developed home sector the players happened to leave last
             String startKey = startSectorKey();
             if(startKey == null) startKey = initialStartKey();
             if(startKey != null){

@@ -244,7 +244,8 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   (`0` hours = forever); the admin panel has a «Забанить...» dialog with reason and duration
   and shows the expiry. Expired bans stop applying automatically.
 - **Companies**: named campaign slots in the admin panel. «Новая» archives the current
-  campaign and starts a clean one (fresh sectors, same research, moderators and bans);
+  campaign and starts a clean one (fresh sectors and an empty research list; moderators and
+  bans are kept);
   «Переключить» archives the current company and loads the selected one. Archives live in
   `companies\<name>`; the active one stays in `campaign/`.
 - **Mod distribution**: the map's «Моды» button downloads the coordinator's current
@@ -305,6 +306,10 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   the stop wait is 300 s (the coordinator's 180 s instance budget plus the home save); `checkPid` rejects the game client
   and verifies the pid file start time; the installer sorts zip names by version; a coordinator
   token can be entered next to the manual URL and is forwarded to instances from config or env.
+- **2.5.8** (server 0.7.8, client 2.5.8 (version bump only), any-research 1.0.4): a new company now starts
+  with **no research** — `unlocks.json` is written as `[]` and the coordinator relocks the
+  in-memory content, so the tech tree is passed again from the start; the archived company keeps
+  its own research and gets it back when switched to.
 - **2.5.2** (server 0.7.2, client unchanged 2.5.1): a new company always starts at the planet's
   starting sector (Ground Zero on Serpulo) with all sector saves reset; the home can be attacked
   and has enemy waves; losing the home resets it to the starting sector; `home.json` is honoured
@@ -462,7 +467,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.5.7     # dist\MP-Sectors-2.5.7.zip
+.\package.ps1 -Version 2.5.8     # dist\MP-Sectors-2.5.8.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of
