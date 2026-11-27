@@ -168,8 +168,8 @@ Players in different sectors see each other's chat:
 - clients poll `GET /chat?since=<id>` every 2 seconds and add messages from other sectors
   to the normal chat as `[sector] Name: text`;
 - messages from your own sector are skipped (vanilla already shows them);
-- the buffer is 200 lines in memory; commands are not relayed; the server word filter is
-  applied before relaying.
+- the buffer is 200 lines, stored in `campaign/chat.json` and kept across restarts;
+  commands are not relayed; the server word filter applies to local chat, relayed lines are not filtered.
 
 ### Moderators
 
@@ -292,6 +292,13 @@ The HTTP API still has no token, so the panel is meant for a trusted network
   as attacked and the next wave waits a minute; every start checks all Serpulo/Erekir sector info
   (a base whose save is gone is marked unowned); `home.json` is validated; the watchdog keeps the
   launch loadout; `/mods` serves `any-research.jar`; a failed start closes the game port.
+- **2.5.6 — full review round** (server 0.7.6, client 2.5.6, any-research 1.0.4): snapshot name
+  traversal blocked; restore/company swap use an atomic gate; `/home` refuses running/booting
+  sectors; server computes launch cost/loadout and verifies accelerator; item/amount overflow
+  clamped; HTTP body cap/cached pool; chat spoof and rate limits; daily snapshots per company;
+  research from running bases no longer refunded; Ground Zero/Onset capture semantics; standalone
+  any-research objectives; client map pause, ban-hours, refresh races, launcher pid/readiness/JRE;
+  `fetch.ps1` partial downloads and instance cleanup; docs aligned.
 - **2.5.2** (server 0.7.2, client unchanged 2.5.1): a new company always starts at the planet's
   starting sector (Ground Zero on Serpulo) with all sector saves reset; the home can be attacked
   and has enemy waves; losing the home resets it to the starting sector; `home.json` is honoured
@@ -449,7 +456,7 @@ The build scripts use `javac --release 17` and `jar` from the JDK.
 Create a player-facing zip (mods + scripts + docs):
 
 ```powershell
-.\package.ps1 -Version 2.5.5     # dist\MP-Sectors-2.5.5.zip
+.\package.ps1 -Version 2.5.6     # dist\MP-Sectors-2.5.6.zip
 ```
 
 Smoke-test the moderator admin endpoint (starts a throwaway coordinator on a temp copy of

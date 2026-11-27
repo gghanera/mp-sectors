@@ -43,6 +43,8 @@ public class LobbyDialog extends PlanetDialog{
     private boolean guest;
     private boolean forceCampaign;
     private boolean acceleratorMode;
+    /** A refresh arrived while a child dialog was open; rebuild once it closes. */
+    private boolean needsOverlay;
 
     public LobbyDialog(){
         //vanilla behaviour: sectors that are not open yet cannot even be selected
@@ -68,11 +70,17 @@ public class LobbyDialog extends PlanetDialog{
 
     /** Rebuilds the overlay after fresh data arrives (moderator list, sector stats). */
     public void refreshOverlay(){
-        //skip while a child dialog (Snapshots, Admin) is on top: rebuilding would add the
-        //overlay above it and cover its buttons
-        if(guest && (Core.scene.getDialog() == null || Core.scene.getDialog() == this)){
-            buildOverlay();
+        if(!guest) return;
+
+        //postpone while a child dialog (Snapshots, Admin) is on top: rebuilding would add the
+        //overlay above it and cover its buttons. act() retries as soon as the child closes.
+        if(Core.scene.getDialog() != null && Core.scene.getDialog() != this){
+            needsOverlay = true;
+            return;
         }
+
+        needsOverlay = false;
+        buildOverlay();
     }
 
     /** Opens the coordinator's campaign map even when the client is not connected to the server. */
@@ -96,10 +104,15 @@ public class LobbyDialog extends PlanetDialog{
         //paint the map with fresh campaign data; it updates live as the answer arrives
         MpCampaignMod.refresh(null);
 
+        //setActive(false) hides the "you are a client" check in PlanetDialog.show(); BaseDialog's
+        //shown listener must not see that as a singleplayer game and pause the running campaign.
+        boolean pause = shouldPause;
         boolean wasActive = setActive(false);
+        shouldPause = false;
         try{
             super.show();
         }finally{
+            shouldPause = pause;
             setActive(wasActive);
         }
 
@@ -134,6 +147,7 @@ public class LobbyDialog extends PlanetDialog{
     @Override
     public void hide(){
         MpCampaignMod.campaignMapOpen = false;
+        needsOverlay = false;
 
         if(acceleratorMode){
             acceleratorMode = false;
@@ -168,6 +182,12 @@ public class LobbyDialog extends PlanetDialog{
         //After a child dialog closes Mindustry sets the current dialog to null, so re-front then.
         if(Core.scene.getDialog() != null && Core.scene.getDialog() != this) return;
 
+        //a refresh arrived while a child dialog was open: build the overlay now that it is gone
+        if(needsOverlay){
+            needsOverlay = false;
+            buildOverlay();
+        }
+
         if(top != null && top.parent != null) top.toFront();
         if(bottom != null && bottom.parent != null) bottom.toFront();
     }
@@ -199,7 +219,10 @@ public class LobbyDialog extends PlanetDialog{
             row.defaults().height(40f).padRight(6f);
             row.button("Обновить", Icon.refresh, () -> MpCampaignMod.refresh(null)).width(110f);
             row.button("Адрес", Icon.settings, this::editUrl).width(80f);
-            row.button("Снимки", Icon.save, MpCampaignMod::openSnapshots).width(100f);
+            //every snapshot action is moderator-only; do not offer a button that only errors out
+            if(MpCampaignMod.isModerator()){
+                row.button("Снимки", Icon.save, MpCampaignMod::openSnapshots).width(100f);
+            }
             row.button("В лобби", Icon.home, MpCampaignMod::returnToLobby).width(100f);
         }).left().row();
 
@@ -415,8 +438,10 @@ public class LobbyDialog extends PlanetDialog{
                     row.add(statusOf(entry)).width(180f).left();
                     row.add("[lightgray]" + infoLine(entry) + "[]").width(190f).left();
                     row.button("Выбрать", Icon.map, () -> {
+                        Sector target = sectorOf(entry);
+                        if(target == null) return;
                         dialog.hide();
-                        selected = sectorOf(entry);
+                        selectSector(target);
                     }).size(140f, 42f);
                 }).growX().left().padBottom(4f).row();
             }
@@ -589,7 +614,7 @@ public class LobbyDialog extends PlanetDialog{
                 if(target != null){
                     row.button("Показать", Icon.map, () -> {
                         dialog.hide();
-                        selected = target;
+                        selectSector(target);
                     }).size(130f, 38f);
                 }
                 list.add(row).growX().left().padBottom(2f).row();

@@ -19,9 +19,19 @@ function Get-Jar($url, $target){
         return
     }
 
+    #download to .part so an interrupted transfer never looks like a finished jar
+    $part = "$target.part"
+    Remove-Item -Force $part -ErrorAction SilentlyContinue
+
     Write-Host "downloading $url ..."
-    curl.exe -fL -o $target $url
-    if($LASTEXITCODE -ne 0){ throw "download failed: $url" }
+    try{
+        curl.exe -fL -o $part $url
+        if($LASTEXITCODE -ne 0){ throw "download failed: $url" }
+        Move-Item -Force $part $target
+    }catch{
+        Remove-Item -Force $part -ErrorAction SilentlyContinue
+        throw
+    }
 
     Get-Item $target | Select-Object FullName,Length
 }

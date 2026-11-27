@@ -6,6 +6,7 @@ import arc.files.Fi;
 import arc.struct.ObjectSet;
 import arc.struct.Seq;
 import arc.util.Log;
+import arc.util.Nullable;
 import mindustry.Vars;
 import mindustry.core.GameState;
 import mindustry.ctype.Content;
@@ -18,10 +19,13 @@ import mindustry.game.Schematics;
 import mindustry.game.SectorInfo;
 import mindustry.io.JsonIO;
 import mindustry.io.SaveIO;
+import mindustry.io.SaveMeta;
 import mindustry.type.Item;
 import mindustry.type.ItemSeq;
 import mindustry.type.Planet;
 import mindustry.type.Sector;
+import mindustry.world.Tile;
+import mindustry.world.WorldContext;
 import mindustry.world.blocks.campaign.Accelerator;
 import mindustry.world.blocks.storage.CoreBlock;
 
@@ -91,9 +95,9 @@ public class SectorRunner{
         try{
             boolean hasSave = campaignSave.exists();
 
-            //Campaign metadata must be loaded BEFORE SaveIO.load: its SaveLoadEvent calls
-            //SectorInfo.write(), which copies info.items into the core. Instances have a fresh
-            //settings.bin, so without this the core would be cleared to an empty info.
+            //Campaign metadata is loaded BEFORE the save: it is the only home of the core cargo
+            //(Building.write does not persist it), and the load path applies it once the save is
+            //known to be valid. Instances have a fresh settings.bin, so there is no local copy.
             boolean infoUsable = false;
             if(campaignInfo.exists()){
                 try{
@@ -110,8 +114,10 @@ public class SectorRunner{
             }
 
             //a sector whose core is gone (lost, or a save made with content mods that are not
-            //loaded here) must be generated again with the client's launch loadout
-            boolean fromSave = hasSave && sector.info.hasCore;
+            //loaded here) must be generated again with the client's launch loadout.
+            //SectorInfo.hasCore defaults to true, so a missing/unreadable info must not count:
+            //without this test the save is loaded as empty metadata and Logic clears the core.
+            boolean fromSave = hasSave && infoUsable && sector.info.hasCore;
 
             //metadata may be lost (crash between the save and info write, a bad copy, a manual
             //cleanup). The save itself is still valid; load it once and rebuild the metadata
@@ -126,14 +132,44 @@ public class SectorRunner{
             //read them before regenerating so the base can be rebuilt
             Seq<mindustry.game.Teams.BlockPlan> lostPlans = (hasSave && !fromSave) ? readLostPlans() : null;
 
+            //true when the campaign info predates the save beside it and must not be applied
+            boolean infoStale = false;
+
             if(fromSave){
                 if(!recovered){
                     copy(campaignSave, localSave);
-                    SaveIO.load(localSave);
+                    SaveMeta meta = readMeta(localSave);
+                    infoStale = isInfoStale(sector, meta);
+
+                    //load without letting Logic's SaveLoadEvent call SectorInfo.write(): that
+                    //pours the campaign info over the freshly loaded world (core, wave, rules)
+                    loadSave(sector, localSave);
+
+                    //readRules only fills the sector in when the save carries a rules string;
+                    //SectorInfo.write() below dereferences it, so guarantee one here
+                    if(Vars.state.rules.sector == null) Vars.state.rules.sector = sector;
+
+                    //a save without a sector is a built-in map that a broken instance rotated into
+                    if(Vars.state.teams.playerCores().isEmpty()
+                        || (meta != null && meta.rules != null && meta.rules.sector == null)){
+                        Log.warn("[mp-sectors] sector @ has no core or is not a campaign map, marking it as unowned", sectorName);
+                        markLost();
+                        return false;
+                    }
+
+                    if(infoStale){
+                        Log.warn("[mp-sectors] sector @ info is older than its save (wave @ < @), keeping the save",
+                            sectorName, sector.info.wave, meta.wave);
+                        //core cargo lives only in the campaign info (Building.write does not
+                        //persist it), so apply the stock while the save keeps its wave rules
+                        applyStock(sector.info);
+                    }else{
+                        //vanilla: the info is authoritative for core items and the wave rules
+                        sector.info.write();
+                    }
                 }
 
-                //a save without a sector is a built-in map that a broken instance rotated into
-                if(Vars.state.teams.playerCores().isEmpty() || Vars.state.rules.sector == null){
+                if(Vars.state.teams.playerCores().isEmpty()){
                     Log.warn("[mp-sectors] sector @ has no core or is not a campaign map, marking it as unowned", sectorName);
                     markLost();
                     return false;
@@ -200,8 +236,18 @@ public class SectorRunner{
             if(fromSave){
                 //do not call logic.play() here: it clears core items and resets wave timers.
                 //Vanilla just resumes the loaded save, so keep the world and apply campaign waves.
-                Vars.state.rules.waves = sector.info.waves;
-                Vars.state.rules.winWave = sector.info.winWave;
+                //A stale info must not overwrite the newer save's wave rules; a recovered sector
+                //has no info at all and keeps the rules read from its save.
+                if(!recovered && !infoStale){
+                    Vars.state.rules.waves = sector.info.waves;
+                    Vars.state.rules.winWave = sector.info.winWave;
+                }
+
+                //the suppressed SaveLoadEvent handler normally enforces these campaign flags
+                Vars.state.rules.coreIncinerates = true;
+                Vars.state.rules.canGameOver = true;
+                Vars.state.rules.allowEditRules = false;
+
                 Events.fire(new RulesLoadEvent(Vars.state.rules, true));
                 Vars.state.set(GameState.State.playing);
             }
@@ -236,14 +282,27 @@ public class SectorRunner{
     /**
      * Loads the save just to see whether it still has a player core. Used when the sector info is
      * missing or unreadable: without this a perfectly good save would be regenerated and lost.
+     *
+     * The load must not apply SectorInfo.write(): the world in memory is the one the sector runs
+     * from, and the empty default info would clear its core before the callback sees it.
      */
     private boolean recoverFromSave(){
         try{
             copy(campaignSave, localSave);
-            SaveIO.load(localSave);
 
             Sector sector = sector();
-            if(sector == null || Vars.state.teams.playerCores().isEmpty() || Vars.state.rules.sector == null){
+            if(sector == null) return false;
+
+            //the custom load context forces this sector into the rules, so a built-in map (a
+            //broken instance rotated into one) has to be rejected from the save header instead
+            SaveMeta meta = readMeta(localSave);
+            if(meta != null && meta.rules != null && meta.rules.sector == null){
+                return false;
+            }
+
+            loadSave(sector, localSave);
+
+            if(Vars.state.teams.playerCores().isEmpty() || Vars.state.rules.sector == null){
                 return false;
             }
 
@@ -259,10 +318,13 @@ public class SectorRunner{
     private Seq<mindustry.game.Teams.BlockPlan> readLostPlans(){
         try{
             copy(campaignSave, localSave);
-            SaveIO.load(localSave);
 
             Sector sector = sector();
-            if(sector == null || Vars.state.rules.sector != sector) return null;
+            if(sector == null) return null;
+
+            loadSave(sector, localSave);
+
+            if(Vars.state.rules.sector != sector) return null;
 
             Seq<mindustry.game.Teams.BlockPlan> plans = new Seq<>();
             for(mindustry.game.Teams.BlockPlan plan : Vars.state.rules.defaultTeam.data().plans){
@@ -273,6 +335,73 @@ public class SectorRunner{
             Log.err("[mp-sectors] could not read plans from @", sectorName, t);
             return null;
         }
+    }
+
+    /**
+     * Loads a sector save without the vanilla SaveLoadEvent behaviour: Logic would call
+     * SectorInfo.write() on the freshly loaded world, copying campaign metadata (core cargo, wave,
+     * wave rules) over the save. The caller applies the info itself once it knows the save is valid.
+     */
+    private static void loadSave(Sector sector, Fi file){
+        SaveIO.load(file, new SectorLoadContext(Vars.world.context, sector));
+    }
+
+    /** @return the save header, or null when it cannot be read. */
+    private static @Nullable SaveMeta readMeta(Fi file){
+        try{
+            return SaveIO.getMeta(file);
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not read the save header of @", file.name(), t);
+            return null;
+        }
+    }
+
+    /**
+     * A crash between SaveIO.save() and the info write leaves the previous info beside a newer
+     * save; applying it would roll the sector back (and persist the rollback on the next save).
+     */
+    private boolean isInfoStale(Sector sector, @Nullable SaveMeta meta){
+        if(meta == null) return false;
+        if(sector.info.wave < meta.wave) return true;
+
+        //same wave: the timestamps still tell which file is newer
+        long infoTime = campaignInfo.lastModified(), saveTime = campaignSave.lastModified();
+        return infoTime > 0 && saveTime > 0 && infoTime < saveTime;
+    }
+
+    /** Applies the campaign info's core stock, leaving the loaded save's wave/rules untouched. */
+    private static void applyStock(SectorInfo info){
+        var core = Vars.state.rules.defaultTeam.core();
+        if(core == null) return;
+
+        core.items.clear();
+        info.items.each((item, amount) -> core.items.add(item, Math.min(Math.max(amount, 0), core.storageCapacity)));
+    }
+
+    /**
+     * Delegates to the real world context but reports a map. SaveIO only skips the
+     * SaveLoadEvent's SectorInfo.write() when the context says "map", which is what keeps the
+     * loaded save intact; the sector is still reported so the save's rules know their sector.
+     */
+    private static class SectorLoadContext implements WorldContext{
+        private final WorldContext base;
+        private final Sector sector;
+
+        SectorLoadContext(WorldContext base, Sector sector){
+            this.base = base;
+            this.sector = sector;
+        }
+
+        @Override public Tile tile(int index){ return base.tile(index); }
+        @Override public void resize(int width, int height){ base.resize(width, height); }
+        @Override public Tile create(int x, int y, int width, int height, int floor){ return base.create(x, y, width, height, floor); }
+        @Override public boolean isGenerating(){ return base.isGenerating(); }
+        @Override public void begin(){ base.begin(); }
+        @Override public void end(){ base.end(); }
+        @Override public void onReadBuilding(){ base.onReadBuilding(); }
+        @Override public void onReadTileData(){ base.onReadTileData(); }
+        @Override public Sector getSector(){ return sector; }
+        @Override public boolean isMap(){ return true; }
     }
 
     private void applyLaunchLoadout(){
@@ -315,7 +444,15 @@ public class SectorRunner{
         var core = Vars.state.rules.defaultTeam.core();
         if(core == null) return;
 
-        parseItems(items).each((item, amount) -> core.items.add(item, amount));
+        //SectorInfo.write() clamps every item to the core's storage capacity on the next load:
+        //anything above it would be silently eaten, so clamp it when it is delivered
+        int capacity = Math.max(core.storageCapacity, core.block.itemCapacity);
+
+        parseItems(items).each((item, amount) -> {
+            int space = Math.max(capacity - core.items.get(item), 0);
+            int added = Math.min(amount, space);
+            if(added > 0) core.items.add(item, added);
+        });
         Log.info("[mp-sectors] accelerator cargo delivered to @: @", sectorName, items);
     }
 
@@ -428,15 +565,27 @@ public class SectorRunner{
 
     /**
      * The start sector stays endless (so it can keep being attacked), but it should still count
-     * as captured for the tech tree once the vanilla capture wave is reached.
+     * as captured for the tech tree once the vanilla capture wave has been survived.
+     *
+     * "Survived" is the vanilla win condition: the wave counter passed the capture wave and no
+     * wave team unit is left (Logic.checkGameState uses state.wave >= winWave, enemies == 0 and
+     * !spawner.isSpawning()). The current code used to fire at the *start* of the capture wave.
      */
     public synchronized void checkCapture(){
         if(!loaded || Vars.state == null || Vars.state.rules == null || !Vars.state.isCampaign()) return;
 
         Sector sector = sector();
         if(sector == null || sector.info == null || sector.info.wasCaptured) return;
-        if(sector.id != sector.planet.startSector || sector.preset == null || sector.preset.captureWave <= 0) return;
-        if(Vars.state.wave < sector.preset.captureWave) return;
+        if(sector.id != sector.planet.startSector) return;
+
+        int captureWave = sector.preset != null ? sector.preset.captureWave : 0;
+        //Erekir's start sector (Onset) has captureWave = 0; use the vanilla default win wave
+        //instead of never becoming captured and locking the whole Erekir tech tree
+        if(captureWave <= 0) captureWave = 30;
+
+        if(Vars.state.wave < captureWave) return;
+        if(Vars.state.enemies > 0) return;
+        if(Vars.spawner != null && Vars.spawner.isSpawning()) return;
 
         sector.info.wasCaptured = true;
         withCampaignLock(campaignInfo.parent().parent(), () -> {
@@ -447,7 +596,7 @@ public class SectorRunner{
                 Log.err("[mp-sectors] could not mark start sector @ as captured", sectorName, t);
             }
         });
-        Log.info("[mp-sectors] start sector @ captured at wave @ (waves stay endless)", sectorName, Vars.state.wave);
+        Log.info("[mp-sectors] start sector @ captured after wave @ (waves stay endless)", sectorName, captureWave);
     }
 
     public synchronized void save(){
@@ -455,6 +604,10 @@ public class SectorRunner{
 
         Sector sector = sector();
         if(sector == null) return;
+
+        //a start sector running as an instance never reaches the coordinator's capture check;
+        //detect it on every autosave (no-op once wasCaptured is set)
+        checkCapture();
 
         try{
             //write the process-local save first; campaign files stay untouched until it is complete
@@ -692,11 +845,15 @@ public class SectorRunner{
      * archives. Without this a snapshot can copy a new .msav next to the old info (or the reverse)
      * and a restore then shows stale or missing bases. The lock is cross-process: every sector
      * instance and the coordinator use the same campaign folder.
+     *
+     * @return false when the cross-process lock could not be taken; the action then did NOT run.
+     *         Writing without the lock can publish a half-updated save/info pair, so callers must
+     *         treat this as a failed write and retry later.
      */
-    public static void withCampaignLock(Fi campaignRoot, Runnable action){
+    public static boolean withCampaignLock(Fi campaignRoot, Runnable action){
         if(campaignRoot == null){
             action.run();
-            return;
+            return true;
         }
 
         String key = campaignRoot.absolutePath();
@@ -704,22 +861,39 @@ public class SectorRunner{
             key, ignored -> new java.util.concurrent.locks.ReentrantLock());
         local.lock();
 
+        java.nio.channels.FileChannel channel = null;
+        java.nio.channels.FileLock lock = null;
         try{
             campaignRoot.mkdirs();
-            java.nio.file.Path lockPath = campaignRoot.child(".save.lock").file().toPath();
-
-            try(java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(lockPath,
-                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
-                java.nio.channels.FileLock ignored = channel.lock()){
-
-                action.run();
-            }catch(java.io.IOException lockFailed){
-                //do not lose a save just because the lock file cannot be opened
-                Log.err("[mp-sectors] campaign lock unavailable, writing without it", lockFailed);
-                action.run();
-            }
-        }finally{
+            channel = java.nio.channels.FileChannel.open(campaignRoot.child(".save.lock").file().toPath(),
+                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
+            lock = channel.lock();
+        }catch(Exception lockFailed){
+            closeQuietly(channel);
             local.unlock();
+            //abort instead of writing unlocked: a snapshot can catch the new save with old info
+            Log.err("[mp-sectors] campaign lock unavailable, write skipped", lockFailed);
+            return false;
+        }
+
+        try{
+            action.run();
+            return true;
+        }finally{
+            try{
+                if(lock != null) lock.release();
+            }catch(java.io.IOException ignored){
+            }
+            closeQuietly(channel);
+            local.unlock();
+        }
+    }
+
+    private static void closeQuietly(java.io.Closeable closeable){
+        if(closeable == null) return;
+        try{
+            closeable.close();
+        }catch(java.io.IOException ignored){
         }
     }
 
@@ -731,14 +905,7 @@ public class SectorRunner{
         if(tmp.exists()) tmp.delete();
         from.copyTo(tmp);
 
-        try{
-            java.nio.file.Files.move(tmp.file().toPath(), to.file().toPath(),
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-        }catch(Throwable t){
-            if(to.exists()) to.delete();
-            tmp.moveTo(to);
-        }
+        replaceFile(tmp, to);
     }
 
     /** Writes through a temp file: a power cut must not leave a half-written json. */
@@ -749,13 +916,54 @@ public class SectorRunner{
         Fi tmp = file.parent().child(file.name() + "." + System.nanoTime() + ".tmp");
         tmp.writeString(text);
 
+        replaceFile(tmp, file);
+    }
+
+    /**
+     * Moves the temp over the destination. Atomic rename when the filesystem supports it; the
+     * portable fallback keeps the old file as a backup until the new one is in place, so a failed
+     * move can never leave the destination missing.
+     *
+     * ponytail: the fallback has a crash window where the destination is at "<name>.<nanotime>.bak"
+     * and not at its real path. Closing it needs a journal/dir-fsync; the backup is the manual
+     * recovery path and the window only exists on filesystems without atomic rename.
+     */
+    private static void replaceFile(Fi tmp, Fi to){
+        java.nio.file.Path source = tmp.file().toPath();
+        java.nio.file.Path target = to.file().toPath();
+
         try{
-            java.nio.file.Files.move(tmp.file().toPath(), file.file().toPath(),
+            java.nio.file.Files.move(source, target,
                 java.nio.file.StandardCopyOption.REPLACE_EXISTING,
                 java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-        }catch(Throwable t){
-            if(file.exists()) file.delete();
-            tmp.moveTo(file);
+            return;
+        }catch(Throwable ignored){
+            //fall back to the portable path below
+        }
+
+        try{
+            java.nio.file.Path backup = null;
+            if(java.nio.file.Files.exists(target)){
+                backup = target.resolveSibling(target.getFileName() + "." + System.nanoTime() + ".bak");
+                java.nio.file.Files.move(target, backup, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            try{
+                java.nio.file.Files.move(source, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }catch(Throwable failed){
+                //put the old file back: the destination must never be lost
+                if(backup != null){
+                    try{
+                        java.nio.file.Files.move(backup, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }catch(Throwable ignored){
+                    }
+                }
+                throw failed;
+            }
+
+            if(backup != null) java.nio.file.Files.deleteIfExists(backup);
+        }catch(java.io.IOException e){
+            throw new RuntimeException(e);
         }
     }
 }

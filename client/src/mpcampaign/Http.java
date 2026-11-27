@@ -18,8 +18,9 @@ public class Http{
         void done(Jval value);
     }
 
+    /** Interactive GET: 8 s. A hung coordinator must not freeze the map/dialogs for minutes. */
     public static void get(String url, Callback callback){
-        request(url, "GET", null, callback, 180000);
+        request(url, "GET", null, callback, 8000);
     }
 
     public static void get(String url, int readTimeoutMs, Callback callback){
@@ -27,6 +28,7 @@ public class Http{
     }
 
     public static void post(String url, Jval body, Callback callback){
+        //landing starts a sector and a restore copies the campaign: both need the long timeout
         request(url, "POST", body == null ? null : body.toString(), callback, 180000);
     }
 
@@ -38,8 +40,9 @@ public class Http{
         Thread thread = new Thread(() -> {
             String saved = null;
             arc.files.Fi temp = target.parent().child(target.name() + ".part");
+            HttpURLConnection connection = null;
             try{
-                HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
+                connection = (HttpURLConnection)new URL(url).openConnection();
                 connection.setRequestMethod("GET");
                 connection.setConnectTimeout(4000);
                 connection.setReadTimeout(180000);
@@ -52,7 +55,6 @@ public class Http{
                 try(InputStream in = connection.getInputStream(); OutputStream out = temp.write(false)){
                     in.transferTo(out);
                 }
-                connection.disconnect();
 
                 //a JSON error page must never be saved as a mod jar
                 try(InputStream check = temp.read()){
@@ -75,6 +77,8 @@ public class Http{
             }catch(Throwable t){
                 Log.err("[mp-campaign] download @ failed", url);
                 temp.delete();
+            }finally{
+                if(connection != null) connection.disconnect();
             }
 
             String path = saved;
@@ -87,13 +91,16 @@ public class Http{
     private static void request(String url, String method, String body, Callback callback, int readTimeoutMs){
         Thread thread = new Thread(() -> {
             Jval result = null;
+            HttpURLConnection connection = null;
             try{
-                HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
+                connection = (HttpURLConnection)new URL(url).openConnection();
                 connection.setRequestMethod(method);
                 connection.setConnectTimeout(4000);
                 //landing starts a whole sector and restoring a snapshot can take a while
                 connection.setReadTimeout(readTimeoutMs);
                 connection.setRequestProperty("Accept", "application/json");
+                String token = Core.settings.getString("mpcampaign-token", "");
+                if(token != null && !token.isEmpty()) connection.setRequestProperty("X-MP-Token", token);
 
                 if(body != null){
                     byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
@@ -112,10 +119,11 @@ public class Http{
                 if(!text.isEmpty()){
                     result = Jval.read(text);
                 }
-
-                connection.disconnect();
             }catch(Throwable t){
                 Log.err("[mp-campaign] request @ @ failed", method, url);
+            }finally{
+                //a timed-out connection keeps its socket/thread otherwise
+                if(connection != null) connection.disconnect();
             }
 
             Jval value = result;

@@ -128,7 +128,9 @@ public class ResearchServer{
             Sector sector = done.preset == null ? null : done.preset.sector;
             SectorInfo info = baseInfo(sector);
             if(info == null) return false;
-            //the endless lobby counts only after its vanilla capture wave was survived
+            //the endless lobby counts only after its capture wave was survived; SectorRunner
+            //sets wasCaptured there (captureWave <= 0, e.g. Erekir's Onset, counts after the
+            //first cleared wave), so this is the same gate the map uses
             if(sector.id == sector.planet.startSector) return info.wasCaptured;
             return info.wasCaptured || (!info.waves && !info.attack);
         }
@@ -192,6 +194,7 @@ public class ResearchServer{
         Fi dir = Core.files.absolute(campaignPath);
         if(!dir.child("info").exists()) return stock;
         Fi[] files = dir.child("info").list();
+        ObjectSet<String> running = runningSectors();
 
         for(Fi file : files){
             if(!file.extension().equals("json")) continue;
@@ -217,12 +220,69 @@ public class ResearchServer{
 
             stock.infos.put(id, info);
             stock.files.put(id, file);
-            if(info.hasCore && dir.child("sectors").child(name + ".msav").exists()){
+            //a running sector's info is a stale autosave: charging it is refunded by its next
+            //save(), because prepare() writes the live core back into the info
+            if(info.hasCore && dir.child("sectors").child(name + ".msav").exists()
+                && !running.contains(name)){
                 stock.bases.add(id);
             }
         }
 
         return stock;
+    }
+
+    /**
+     * Sector keys that currently have a live server process. Their campaign info is only the last
+     * autosave; the live core has moved on since, and the instance's next save() calls
+     * SectorInfo.prepare(), which would restock anything deducted here.
+     *
+     * The coordinator publishes campaign/running.json for every process; without it a running
+     * instance is still recognisable by its status.json heartbeat in the local instances folder.
+     */
+    private static ObjectSet<String> runningSectors(){
+        ObjectSet<String> running = new ObjectSet<>();
+        if(campaignPath == null) return running;
+
+        Fi shared = Core.files.absolute(campaignPath).child("running.json");
+        if(shared.exists()){
+            try{
+                String[] keys = JsonIO.read(String[].class, shared.readString());
+                if(keys != null){
+                    for(String key : keys){
+                        if(key != null && !key.isEmpty()) running.add(key);
+                    }
+                }
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not read running.json", t);
+            }
+        }
+
+        //no shared list: an instance rewrites status.json every couple of seconds, a stopped one
+        //leaves the file with an old timestamp, so a fresh file means the sector is live
+        Fi instances = Core.files.local("instances");
+        if(instances.exists()){
+            long now = System.currentTimeMillis();
+            for(Fi dir : instances.list()){
+                Fi status = dir.child("status.json");
+                if(status.exists() && now - status.lastModified() < 10_000L){
+                    running.add(dir.name());
+                }
+            }
+        }
+
+        //the home sector runs inside the coordinator, not an instance folder: its campaign info
+        //is just as stale, and its live core is only chargeable from that process
+        Fi home = Core.files.absolute(campaignPath).child("home.json");
+        if(home.exists()){
+            try{
+                String key = new arc.util.serialization.JsonReader().parse(home.readString()).getString("sector", "");
+                if(!key.isEmpty()) running.add(key);
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not read home.json", t);
+            }
+        }
+
+        return running;
     }
 
     /** @return the spent items as text, or null when the cost could not be paid. */
@@ -232,7 +292,24 @@ public class ResearchServer{
             reply(player, "[scarlet]Не удалось определить планету исследования.");
             return null;
         }
+        if(campaignPath == null){
+            reply(player, "[scarlet]Папка кампании не найдена, исследование отменено.");
+            return null;
+        }
 
+        //read-check-deduct-write is one critical section: a sector instance autosaves the same
+        //info files from another process, and its prepare() would refund the deduction
+        Fi campaign = Core.files.absolute(campaignPath);
+        String[] spent = new String[1];
+        boolean locked = SectorRunner.withCampaignLock(campaign, () -> spent[0] = payLocked(node, planet, player));
+        if(!locked){
+            reply(player, "[scarlet]Кампания сохраняется, повторите исследование.");
+            return null;
+        }
+        return spent[0];
+    }
+
+    private static @Nullable String payLocked(TechNode node, Planet planet, @Nullable Player player){
         Sector current = Vars.state.isCampaign() ? Vars.state.getSector() : null;
         boolean currentOnPlanet = current != null && current.planet == planet;
         int currentId = currentOnPlanet ? current.id : -1;
@@ -266,7 +343,7 @@ public class ResearchServer{
             ItemStack requirement = node.requirements[i];
             int remaining = owed[i];
 
-            //other base sectors first
+            //other base sectors first (running ones are not in the stock: their info is stale)
             for(Integer id : stock.bases){
                 if(remaining <= 0) break;
                 if(id == currentId) continue;

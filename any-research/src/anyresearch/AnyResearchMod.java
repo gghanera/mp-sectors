@@ -29,6 +29,7 @@ import mindustry.type.ItemStack;
 import mindustry.type.Planet;
 import mindustry.type.Sector;
 import mindustry.ui.dialogs.ResearchDialog;
+import mindustry.world.blocks.storage.CoreBlock;
 
 /**
  * Any Research - multiplayer research for everyone who has the mod.
@@ -58,6 +59,10 @@ public class AnyResearchMod extends Mod{
 
     private boolean patched;
 
+    /** One request per node per second: a stuck click used to send a chat command every frame. */
+    private String lastRequestNode = "";
+    private long lastRequestTime;
+
     @Override
     public void init(){
         Events.on(ClientLoadEvent.class, e -> patchTree());
@@ -85,6 +90,12 @@ public class AnyResearchMod extends Mod{
                 TechNode node = (TechNode)hit.userObject;
                 //already researched on this server - let the stock click handler show its info
                 if(node.content.unlockedHost()) return false;
+
+                //debounce: a held click or a double click must not flood the chat command channel
+                long now = System.currentTimeMillis();
+                if(node.content.name.equals(lastRequestNode) && now - lastRequestTime < 1000L) return true;
+                lastRequestNode = node.content.name;
+                lastRequestTime = now;
 
                 Log.info("[any-research] requesting @ from the server.", node.content.name);
                 Call.sendChatMessage("/anyresearch " + TOKEN + " " + node.content.name);
@@ -195,12 +206,14 @@ public class AnyResearchMod extends Mod{
                 }else{
                     TechNode root = node.rootNode != null ? node.rootNode : node;
                     Planet planet = planetOf(node);
+                    Sector live = Vars.state.isCampaign() ? Vars.state.getSector() : null;
+                    boolean liveOnPlanet = planet != null && live != null && live.planet == planet;
                     Log.info("[any-research] @: unlocked=@ cost=@ objectivesMet=@ parent=@ root=@ planet=@ baseSectors=@",
                         node.content.name, node.content.unlockedHost(), node.requirements.length, objectivesMet(node),
                         node.parent == null ? "-" : node.parent.content.name,
                         root.name == null ? "?" : root.name,
                         planet == null ? "NOT MATCHED" : planet.name,
-                        sectorsFor(node).size);
+                        basesFor(node, liveOnPlanet ? live : null).size + (liveOnPlanet ? 1 : 0));
                 }
             }
 
@@ -258,14 +271,19 @@ public class AnyResearchMod extends Mod{
     }
 
     private static boolean objectivesMet(TechNode node){
+        boolean coordinator = hasCoordinator();
+
         for(Objective o : node.objectives){
-            //the coordinator checks sector/planet objectives against the campaign files:
-            //a dedicated server has no SaveSlot, so the local Sector cannot answer them
-            //a guest cannot see the server's SaveSlots; the coordinator/host checks these
-            //sector/planet objectives and rejects the research if they are not met
-            if((Vars.net.client() || Vars.headless) && (o instanceof Objectives.SectorComplete
+            if((Vars.net.client() || (Vars.headless && coordinator))
+                && (o instanceof Objectives.SectorComplete
+                    || o instanceof Objectives.OnSector
+                    || o instanceof Objectives.OnPlanet)){
+                continue;
+            }
+            if(o instanceof Objectives.SectorComplete
                 || o instanceof Objectives.OnSector
-                || o instanceof Objectives.OnPlanet)){
+                || o instanceof Objectives.OnPlanet){
+                if(!campaignObjective(o)) return false;
                 continue;
             }
             if(!o.complete()) return false;
@@ -273,25 +291,64 @@ public class AnyResearchMod extends Mod{
         return true;
     }
 
+    /** Standalone server fallback: evaluate sector/planet goals from SectorInfo, not SaveSlots. */
+    private static boolean campaignObjective(Objective o){
+        if(o instanceof Objectives.OnSector on){
+            return hasBase(on.preset == null ? null : on.preset.sector);
+        }
+        if(o instanceof Objectives.SectorComplete done){
+            Sector sector = done.preset == null ? null : done.preset.sector;
+            if(!hasBase(sector)) return false;
+            if(sector.id == sector.planet.startSector) return sector.info.wasCaptured;
+            return sector.info.wasCaptured || (!sector.info.waves && !sector.info.attack);
+        }
+        if(o instanceof Objectives.OnPlanet on){
+            if(on.planet == null) return false;
+            for(Sector s : on.planet.sectors){
+                if(hasBase(s)) return true;
+            }
+            return false;
+        }
+        return o.complete();
+    }
+
+    private static boolean hasBase(@Nullable Sector sector){
+        return sector != null && sector.info != null && sector.info.hasCore && sector.info.storageCapacity > 0;
+    }
+
+    /** True when the campaign coordinator mod is loaded in this process. */
+    private static boolean hasCoordinator(){
+        return Vars.mods != null && Vars.mods.locateMod("mp-sectors") != null;
+    }
+
     /**
-     * Takes the cost out of the same stock the vanilla tech tree itself uses: every base sector of
-     * the node's planet, with the sector being played drained last
-     * (Sector.items / Sector.removeItem, used by ResearchDialog.rebuildItems).
-     * ponytail: paid in full, all-or-nothing. Vanilla accumulates partial progress in
-     * TechNode.finishedRequirements, but that lives in each machine's own settings and would
-     * desync between the server and guest clients, so it is deliberately not used.
+     * Takes the cost out of the campaign stock: the stored info of every base sector of the node's
+     * planet, and the live core of the sector being played.
+     *
+     * Sector.items()/removeItem() are not used: on a headless server they return the team item
+     * pool (not the core storage), and SectorInfo.prepare() would overwrite the deduction from the
+     * core on the next save, so the payment vanished. Full amount, all-or-nothing.
      */
     private static @Nullable String pay(TechNode node, @Nullable Player player){
-        Seq<Sector> sectors = sectorsFor(node);
+        Planet planet = planetOf(node);
+        if(planet == null){
+            reply(player, "[scarlet]Не удалось определить планету исследования.");
+            return null;
+        }
 
-        //how much is still owed per item; the host may have paid part of it in the stock dialog already
+        Sector current = Vars.state.isCampaign() ? Vars.state.getSector() : null;
+        boolean currentOnPlanet = current != null && current.planet == planet;
+        var currentCore = currentOnPlanet ? Vars.state.rules.defaultTeam.core() : null;
+        Seq<Sector> bases = basesFor(node, currentOnPlanet ? current : null);
+
+        //full cost: finishedRequirements is the host's local progress and used to undercharge
         int[] owed = new int[node.requirements.length];
         Seq<String> missing = new Seq<>();
         for(int i = 0; i < node.requirements.length; i++){
             ItemStack req = node.requirements[i];
-            owed[i] = Math.max(req.amount - node.finishedRequirements[i].amount, 0);
+            owed[i] = Math.max(req.amount, 0);
             if(owed[i] == 0) continue;
-            int have = stock(sectors, req.item);
+            int have = stock(bases, currentCore, req.item);
             if(have < owed[i]) missing.add(label(req.item) + " " + have + "/" + owed[i]);
         }
         if(!missing.isEmpty()){
@@ -300,31 +357,41 @@ public class AnyResearchMod extends Mod{
         }
 
         Seq<String> spent = new Seq<>();
+        Seq<Sector> changed = new Seq<>();
         for(int i = 0; i < node.requirements.length; i++){
             if(owed[i] == 0) continue;
             ItemStack req = node.requirements[i];
-
-            int before = stock(sectors, req.item);
             int remaining = owed[i];
-            for(Sector sector : sectors){
+            int before = stock(bases, currentCore, req.item);
+
+            //stored base sectors first
+            for(Sector sector : bases){
                 if(remaining <= 0) break;
-                int take = Math.min(Math.max(sector.items().get(req.item), 0), remaining);
+                int take = Math.min(Math.max(sector.info.items.get(req.item), 0), remaining);
                 if(take > 0){
-                    //a dedicated server has no SaveSlot, so Sector.hasBase() is false there;
-                    //write the stored SectorInfo directly for sectors that are not being played
-                    if(sector.isBeingPlayed()){
-                        sector.removeItem(req.item, take);
-                    }else{
-                        sector.info.items.add(req.item, -take);
-                        sector.info.items.checkNegative();
-                        sector.saveInfo();
-                    }
+                    sector.info.items.add(req.item, -take);
+                    sector.info.items.checkNegative();
+                    remaining -= take;
+                    if(!changed.contains(sector)) changed.add(sector);
+                }
+            }
+
+            //then the core that is being played right now
+            if(remaining > 0 && currentCore != null){
+                int take = Math.min(Math.max(currentCore.items.get(req.item), 0), remaining);
+                if(take > 0){
+                    currentCore.items.remove(req.item, take);
                     remaining -= take;
                 }
             }
 
-            //research is never handed out for free: if the stock did not actually go down, cancel
-            int after = stock(sectors, req.item);
+            if(remaining > 0){
+                reply(player, "[scarlet]Не удалось списать ресурсы, исследование отменено.");
+                return null;
+            }
+
+            //research is never free: the stock must actually have gone down by the owed amount
+            int after = stock(bases, currentCore, req.item);
             if(after != before - owed[i]){
                 Log.warn("[any-research] deduction mismatch for @: @ -> @, expected @", req.item.name, before, after, before - owed[i]);
                 reply(player, "[scarlet]Не удалось списать ресурсы, исследование отменено.");
@@ -335,38 +402,32 @@ public class AnyResearchMod extends Mod{
             spent.add(label(req.item) + " " + owed[i]);
         }
 
+        for(Sector sector : changed) sector.saveInfo();
         node.save();
         return String.join(", ", spent);
     }
 
-    private static int stock(Seq<Sector> sectors, Item item){
+    private static int stock(Seq<Sector> bases, @Nullable CoreBlock.CoreBuild currentCore, Item item){
         int total = 0;
-        for(Sector sector : sectors){
-            total += Math.max(sector.items().get(item), 0);
+        for(Sector sector : bases){
+            total += Math.max(sector.info.items.get(item), 0);
         }
+        if(currentCore != null) total += Math.max(currentCore.items.get(item), 0);
         return total;
     }
 
-    /** Base sectors of the node's planet, the played sector last. */
-    private static Seq<Sector> sectorsFor(TechNode node){
+    /** Base sectors of the node's planet, except the sector being played (charged from its core). */
+    private static Seq<Sector> basesFor(TechNode node, @Nullable Sector current){
         TechNode root = node.rootNode != null ? node.rootNode : node;
-        Sector current = Vars.state.isCampaign() ? Vars.state.rules.sector : null;
+        Planet planet = planetOf(node);
 
         Seq<Sector> sectors = new Seq<>();
-        boolean currentAdded = false;
+        if(planet == null || planet.techTree != root) return sectors;
 
-        for(Planet planet : Vars.content.planets()){
-            if(planet.techTree != root) continue;
-            for(Sector sector : planet.sectors){
-                if(sector.info == null || !sector.info.hasCore || sector.isFrozen()) continue;
-                if(sector == current){
-                    currentAdded = true;
-                    continue;
-                }
-                sectors.add(sector);
-            }
+        for(Sector sector : planet.sectors){
+            if(sector == current || sector.info == null || !sector.info.hasCore || sector.isFrozen()) continue;
+            sectors.add(sector);
         }
-        if(currentAdded) sectors.add(current);
         return sectors;
     }
 

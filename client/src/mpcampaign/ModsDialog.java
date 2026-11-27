@@ -39,7 +39,9 @@ public class ModsDialog extends BaseDialog{
                 return;
             }
 
-            body.add("[lightgray]Сервер: [white]" + MpCampaignMod.serverVersion
+            String serverVer = MpCampaignMod.str(json, "campaignVersion");
+            if(serverVer.isEmpty()) serverVer = MpCampaignMod.campaignVersion;
+            body.add("[lightgray]Сервер: [white]" + serverVer
                 + "   [lightgray]у вас: [white]" + MpCampaignMod.localVersion())
                 .left().row();
             body.add("[lightgray]Скачайте мод и перезапустите игру.").left().padBottom(8f).row();
@@ -67,9 +69,18 @@ public class ModsDialog extends BaseDialog{
         });
     }
 
+    /** Server-supplied names are used as a file name and in a query: only a plain jar is accepted. */
+    private static final java.util.regex.Pattern safeName = java.util.regex.Pattern.compile("\\w[\\w.-]*\\.jar");
+
     private void download(String name){
+        if(name == null || !safeName.matcher(name).matches()){
+            Vars.ui.showInfoFade("[scarlet]Некорректное имя файла мода.");
+            return;
+        }
+
         arc.files.Fi target = Vars.modDirectory.child(name);
-        Http.download(MpCampaignMod.url() + "/download?file=" + name, target, saved -> {
+        String query = java.net.URLEncoder.encode(name, java.nio.charset.StandardCharsets.UTF_8);
+        Http.download(MpCampaignMod.url() + "/download?file=" + query, target, saved -> {
             if(saved == null){
                 Vars.ui.showInfoFade("[scarlet]Не удалось скачать " + name + ".");
             }else if(saved.equals(target.absolutePath())){

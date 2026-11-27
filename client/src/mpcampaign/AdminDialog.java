@@ -272,14 +272,25 @@ public class AdminDialog extends BaseDialog{
 
         dialog.buttons.button("Забанить", Icon.cancel, () -> {
             String target = name[0] == null ? "" : name[0].trim();
-            if(target.isEmpty()) return;
-
-            long until = 0;
-            try{
-                until = Math.max(0, Long.parseLong(hours[0].trim()));
-            }catch(Throwable ignored){
+            if(target.isEmpty()){
+                Vars.ui.showInfoFade("[scarlet]Введите ник игрока.");
+                return;
             }
-            post("ban", null, target, null, reason[0] == null ? "" : reason[0].trim(), until);
+
+            //the coordinator treats a missing hours as a permanent ban: never send 0 because of a typo
+            long banHours;
+            try{
+                banHours = Long.parseLong((hours[0] == null ? "" : hours[0]).trim());
+            }catch(NumberFormatException e){
+                Vars.ui.showInfoFade("[scarlet]Часы бана: введите целое число (0 — навсегда).");
+                return;
+            }
+            if(banHours < 0){
+                Vars.ui.showInfoFade("[scarlet]Часы бана не могут быть отрицательными.");
+                return;
+            }
+
+            post("ban", null, target, null, reason[0] == null ? "" : reason[0].trim(), banHours);
             dialog.hide();
         }).size(160f, 46f);
         dialog.buttons.button("Отмена", dialog::hide).size(140f, 46f);

@@ -73,14 +73,19 @@ public class ServerDialog extends BaseDialog{
         cont.add().height(8f).row();
 
         cont.label(() -> {
-            if(!ServerProcess.running()) return "[lightgray]Сервер: остановлен";
+            if(ServerProcess.starting) return "[lightgray]Сервер: запускается...";
+            if(!ServerProcess.running()){
+                return "[lightgray]Сервер: остановлен"
+                    + (ServerProcess.startError.isEmpty() ? "" : "   [scarlet]" + ServerProcess.startError);
+            }
             return "[green]Сервер запущен[]   [lightgray]игроки: [white]" + ServerProcess.statusPlayers + "/" + ServerProcess.statusMaxPlayers
                 + "   [lightgray]секторы: [white]" + ServerProcess.statusSectors + "/" + ServerProcess.statusMaxSectors
                 + (ServerProcess.statusOnline ? "" : "   [scarlet]HTTP недоступен");
         }).left().row();
 
         cont.label(() -> "[lightgray]API: [white]" + ServerProcess.apiUrl()
-            + "   [lightgray]карта: [white]" + (ServerProcess.statusOnline ? "доступна" : "нет связи")).left().row();
+            + "   [lightgray]карта: [white]"
+            + (ServerProcess.statusOnline ? "доступна" : (ServerProcess.starting ? "запускается" : "нет связи"))).left().row();
 
         cont.button("Снимки кампании", Icon.save, MpCampaignMod::openSnapshots).height(46f).growX().padTop(6f).row();
 

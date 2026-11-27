@@ -22,9 +22,13 @@ public class SnapshotDialog extends BaseDialog{
         addCloseButton();
 
         cont.table(t -> {
-            t.button("Создать снимок", Icon.save, MpCampaignMod::saveSnapshot).size(200f, 46f).left();
+            //creating a snapshot is a moderator action; keep the list browsable without it
+            t.button("Создать снимок", Icon.save, MpCampaignMod::saveSnapshot).size(200f, 46f).left()
+                .disabled(b -> !allowed());
             t.button("Обновить", Icon.refresh, this::load).size(150f, 46f).padLeft(6f).left();
-            t.add("[lightgray]каждые 10 минут, до 50 штук; дневной — 7 дней; перед откатом — автоматически").padLeft(12f).left();
+            t.label(() -> allowed()
+                ? "[lightgray]каждые 10 минут, до 50 штук; дневной — 7 дней; перед откатом — автоматически"
+                : "[orange]только просмотр: откат и правка доступны модераторам кампании").padLeft(12f).left();
         }).growX().left().row();
 
         cont.pane(t -> {
@@ -40,11 +44,19 @@ public class SnapshotDialog extends BaseDialog{
         load();
     }
 
+    /**
+     * Snapshot actions are moderator-only on the coordinator. A local coordinator is run by this
+     * client's owner, whose moderator entry may not have arrived in /status yet.
+     */
+    private static boolean allowed(){
+        return MpCampaignMod.isModerator() || ServerProcess.running();
+    }
+
     private void load(){
         list.clear();
         list.add("[lightgray]Загрузка...").left().row();
 
-        Http.get(MpCampaignMod.url() + "/snapshots", json -> {
+        Http.get(MpCampaignMod.url() + "/snapshots", 60000, json -> {
             list.clear();
 
             if(json == null){
@@ -82,9 +94,12 @@ public class SnapshotDialog extends BaseDialog{
                 row.row();
 
                 row.add(comment.isEmpty() ? "" : "[lightgray]“" + comment + "”[]").width(330f).wrap().left();
-                row.button("Сектор...", Icon.map, () -> showSectors(name)).size(110f, 38f).padLeft(4f);
-                row.button("Комментарий", Icon.edit, () -> editComment(name, comment)).size(130f, 38f).padLeft(4f);
-                row.button("Загрузить", Icon.upload, () -> confirm(name)).size(120f, 38f).padLeft(4f).disabled(!valid);
+                row.button("Сектор...", Icon.map, () -> showSectors(name)).size(110f, 38f).padLeft(4f)
+                    .disabled(b -> !allowed());
+                row.button("Комментарий", Icon.edit, () -> editComment(name, comment)).size(130f, 38f).padLeft(4f)
+                    .disabled(b -> !allowed());
+                row.button("Загрузить", Icon.upload, () -> confirm(name)).size(120f, 38f).padLeft(4f)
+                    .disabled(b -> !valid || !allowed());
 
                 list.add(row).growX().left().padBottom(6f).row();
             }

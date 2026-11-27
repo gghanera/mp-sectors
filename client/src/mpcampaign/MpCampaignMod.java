@@ -27,6 +27,7 @@ import mindustry.game.EventType.ClientLoadEvent;
 import mindustry.game.EventType.ClientServerConnectEvent;
 import mindustry.game.EventType.TapEvent;
 import mindustry.game.EventType.Trigger;
+import mindustry.game.Rules;
 import mindustry.game.Saves.SaveSlot;
 import mindustry.game.Schematic;
 import mindustry.game.SectorInfo;
@@ -110,6 +111,11 @@ public class MpCampaignMod extends Mod{
     private static long lastStatusPoll;
     private static boolean statusPending;
 
+    //every refresh/status chain gets a number; a late answer from an older chain must not
+    //overwrite data a newer one already applied (map/land() read paused/home/entries)
+    private static int refreshGeneration, statusGeneration;
+    private static final arc.struct.Seq<Runnable> refreshWaiters = new arc.struct.Seq<>();
+
     @Override
     public void init(){
         Events.on(ClientLoadEvent.class, e -> {
@@ -134,18 +140,15 @@ public class MpCampaignMod extends Mod{
 
     public static String url(){
         String value = Core.settings.getString(urlKey, "");
+        boolean manual = Core.settings.getBool("mpcampaign-url-manual", false);
 
-        //by default use the same host as the game server (works through Radmin/VPN and LAN)
-        if(value == null || value.isEmpty() || value.equals(defaultUrl)){
+        //by default use the same host as the game server (works through Radmin/VPN and LAN).
+        //A launcher-written 127.0.0.1 is not a manual choice; an explicitly edited URL is.
+        if(value == null || value.isEmpty() || (!manual && value.equals(defaultUrl))){
             String host = serverHost();
-            if(!host.equals("127.0.0.1")){
-                value = "http://" + host + ":8090";
-            }else if(value == null || value.isEmpty()){
-                value = defaultUrl;
-            }
+            value = "127.0.0.1".equals(host) ? defaultUrl : "http://" + host + ":8090";
         }
 
-        if(value == null || value.isEmpty()) value = defaultUrl;
         return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
     }
 
@@ -165,6 +168,7 @@ public class MpCampaignMod extends Mod{
 
     public static void url(String value){
         Core.settings.put(urlKey, value == null ? defaultUrl : value.trim());
+        Core.settings.put("mpcampaign-url-manual", true);
     }
 
     public static void installDialog(){
@@ -221,9 +225,8 @@ public class MpCampaignMod extends Mod{
         pollChat();
         pollStatus();
 
-        if(ServerProcess.running()){
-            ServerProcess.refreshStatus();
-        }
+        //always poll: refreshStatus() also clears the "available" line after a stop or crash
+        if(!Vars.headless) ServerProcess.refreshStatus();
     }
 
     /** Mirrors the speed chosen in the Time Control mod onto the campaign server. */
@@ -430,23 +433,32 @@ public class MpCampaignMod extends Mod{
 
     /** Fetches /sectors and /status, then paints the local sectors. */
     public static void refresh(Runnable done){
+        int generation = ++refreshGeneration;
+        if(done != null) refreshWaiters.add(done);
         loading = true;
         lastError = "";
 
-        Http.get(url() + "/sectors", sectorsJson -> {
+        Http.get(url() + "/sectors", 30000, sectorsJson -> {
+            //a newer refresh owns loading/entries now; this answer is stale
+            if(generation != refreshGeneration) return;
+
             if(sectorsJson == null){
                 loading = false;
                 online = false;
                 lastError = "Координатор недоступен.";
-                if(done != null) done.run();
+                finishRefresh();
                 return;
             }
 
             online = true;
             parseSectors(sectorsJson);
 
+            int status = ++statusGeneration;
             Http.get(url() + "/status", statusJson -> {
-                if(statusJson != null) parseStatus(statusJson);
+                if(generation != refreshGeneration) return;
+
+                //a newer pollStatus may already have applied fresher data (paused/home/names)
+                if(statusJson != null && status == statusGeneration) parseStatus(statusJson);
                 applyData();
 
                 //keeps the "Админка" button and the status line in sync without reopening the map
@@ -455,9 +467,22 @@ public class MpCampaignMod extends Mod{
                 }
 
                 loading = false;
-                if(done != null) done.run();
+                finishRefresh();
             });
         });
+    }
+
+    /** Runs every callback waiting for a refresh; only the newest chain gets here. */
+    private static void finishRefresh(){
+        arc.struct.Seq<Runnable> waiters = refreshWaiters.copy();
+        refreshWaiters.clear();
+        for(Runnable waiter : waiters){
+            try{
+                waiter.run();
+            }catch(Throwable t){
+                Log.err("[mp-campaign] refresh callback failed", t);
+            }
+        }
     }
 
     private static void parseSectors(Jval root){
@@ -548,9 +573,11 @@ public class MpCampaignMod extends Mod{
         lastStatusPoll = now;
         statusPending = true;
 
+        int generation = ++statusGeneration;
         Http.get(url() + "/status", 8000, json -> {
             statusPending = false;
-            if(json != null) parseStatus(json);
+            //ignore an answer that a newer refresh/status already superseded
+            if(json != null && generation == statusGeneration) parseStatus(json);
         });
     }
 
@@ -576,7 +603,7 @@ public class MpCampaignMod extends Mod{
             info.shown = true;
 
             sector.info = info;
-            sector.save = entry.hasBase ? fakeSlot(planet, entry.id) : null;
+            sector.save = entry.hasBase ? fakeSlot(sector, entry) : null;
 
             //allowed story sectors must not be drawn with a lock on the map
             if(entry.allowed) markPresetUnlocked(sector);
@@ -626,9 +653,21 @@ public class MpCampaignMod extends Mod{
         originalUnlocked.clear();
     }
 
-    private static SaveSlot fakeSlot(Planet planet, int id){
-        SaveSlot slot = Vars.control.saves.new SaveSlot(Core.files.local("mpcampaign-" + planet.name + "-" + id));
-        slot.meta = new SaveMeta(0, 0, 0, 0, "", 0, null, new StringMap());
+    private static SaveSlot fakeSlot(Sector sector, Entry entry){
+        SaveSlot slot = Vars.control.saves.new SaveSlot(Core.files.local("mpcampaign-" + sector.planet.name + "-" + sector.id));
+
+        //the planet panel reads date/playtime and SaveSlot.getSector()/mode(); null rules or a
+        //zero timestamp shows 1970 and can throw, so fill a usable meta instead of a blank one
+        Rules rules = new Rules();
+        rules.sector = sector;
+
+        SectorInfo info = entry == null ? null : entry.parsed;
+        if(info != null){
+            rules.waves = info.waves;
+        }
+
+        int wave = info == null ? 1 : Math.max(1, info.wave);
+        slot.meta = new SaveMeta(0, System.currentTimeMillis(), 0, 0, "", wave, rules, new StringMap());
         return slot;
     }
 
@@ -778,9 +817,9 @@ public class MpCampaignMod extends Mod{
         long serverSteam = numLong(response, "steamId", 0);
         long mySteam = steamId();
 
-        //the local game is on the same PC as the server: direct TCP is more reliable than P2P
-        boolean local = host.equals("127.0.0.1") || host.equals("localhost")
-            || url().contains("127.0.0.1") || url().contains("localhost");
+        //the coordinator says the server address; only that decides whether it is the local PC.
+        //a local coordinator/port forward in front of a remote Steam server must still use P2P.
+        boolean local = host.equals("127.0.0.1") || host.equals("localhost");
 
         if(!local && !steamHost.isEmpty() && serverSteam != 0 && mySteam != 0 && mySteam != serverSteam){
             Vars.ui.join.connect(steamHost, 0);
@@ -1111,9 +1150,15 @@ public class MpCampaignMod extends Mod{
         return name == null || name.isEmpty() ? key : name;
     }
 
+    /** @return whether the message mentions this exact name, not just a longer name that starts with it. */
     private static boolean mentions(String message, String name){
-        return name != null && !name.isEmpty()
-            && message.toLowerCase().contains("@" + name.toLowerCase());
+        if(message == null || name == null || name.isEmpty()) return false;
+
+        //a word boundary: "@Ann" must not match "@Anna", "@Ann_2" or "@Annabel"
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+            "(?<![\\p{L}\\p{N}_])@" + java.util.regex.Pattern.quote(name) + "(?![\\p{L}\\p{N}_])",
+            java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE);
+        return pattern.matcher(message).find();
     }
 
     /** A cross-sector chat line; any @nick highlights the whole message. */

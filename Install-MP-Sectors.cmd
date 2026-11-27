@@ -18,7 +18,7 @@ $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $ReleaseApi = "https://api.github.com/repos/gghanera/mp-sectors/releases/latest"
-$FallbackZip = "https://github.com/gghanera/mp-sectors/releases/download/v2.5.5/MP-Sectors-2.5.5.zip"
+$FallbackZip = "https://github.com/gghanera/mp-sectors/releases/download/v2.5.6/MP-Sectors-2.5.6.zip"
 
 function Write-Step($text){
     Write-Host ""
@@ -245,7 +245,8 @@ New-Item -ItemType Directory -Force $InstallDir | Out-Null
 # 1. server package
 Write-Step "1/5 Скачивание сервера"
 if(-not $PackageZip){
-    $local = Get-ChildItem $ActivationDir -Filter "MP-Sectors-*.zip" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    $local = Get-ChildItem $ActivationDir -Filter "MP-Sectors-*.zip" -File -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | Select-Object -First 1
     if($local){ $PackageZip = $local.FullName }
 }
 if(-not $PackageZip){
@@ -349,3 +350,4 @@ Write-Host "Модератор новой кампании: $env:USERNAME" -Fore
 Write-Host "  (если ник в игре другой, впиши его в campaign\moderators.json)"
 Write-Host "Клиентские моды раздай игрокам (mp-campaign.jar и any-research.jar)."
 Write-Host ""
+

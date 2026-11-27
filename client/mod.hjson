@@ -11,10 +11,11 @@ main: "mpcampaign.MpCampaignMod"
 
 description: "Coordinator client: shows the campaign sector map and lands on sectors. Talks to the mp-sectors coordinator over HTTP; install on every player."
 
-version: "2.5.2"
+version: "2.5.6"
 
 #minimum game build required
 minGameVersion: 160
 
 java: true
+
 

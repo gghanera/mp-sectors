@@ -13,14 +13,19 @@ import com.sun.net.httpserver.HttpServer;
 import mindustry.Vars;
 import mindustry.content.Blocks;
 import mindustry.ctype.ContentType;
+import mindustry.game.Schematic;
+import mindustry.game.Schematics;
 import mindustry.game.SectorInfo;
 import mindustry.gen.Call;
 import mindustry.gen.Groups;
 import mindustry.gen.Player;
 import mindustry.io.JsonIO;
 import mindustry.net.Packets.KickReason;
+import mindustry.type.Item;
+import mindustry.type.ItemSeq;
 import mindustry.type.Planet;
 import mindustry.type.Sector;
+import mindustry.world.blocks.campaign.Accelerator;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -34,6 +39,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 /**
  * The campaign coordinator: hosts the home sector, serves the sector list over HTTP, and starts or
@@ -47,6 +54,10 @@ public class Coordinator{
     public static class Config{
         public String campaign = "";
         public int httpPort = 8090;
+        /** When non-empty, mutating HTTP requests must send it as X-MP-Token. Empty keeps LAN trust. */
+        public String httpToken = "";
+        /** Address handed to clients in /land; empty uses the request Host header. */
+        public String publicHost = "";
         public int gamePort = 6567;
         public int maxSectors = 5;
         public int maxPlayers = 10;
@@ -84,25 +95,12 @@ public class Coordinator{
         public boolean steam;
         public String steamJar = "";
         public String steamNative = "";
+        /** Optional coordinator HTTP token; forwarded on /admin posts. */
+        public String httpToken = "";
     }
 
     public static class Home{
         public String sector = "";
-    }
-
-    public static class SectorEntry{
-        public String planet;
-        public int id;
-        public String name;
-        public boolean hasBase, captured, attacked, allowed, running;
-        public int players;
-        public String info;
-    }
-
-    public static class SectorsResponse{
-        public String home;
-        public int maxSectors, maxPlayers, players;
-        public SectorEntry[] sectors = {};
     }
 
     public static class LandRequest{
@@ -180,12 +178,6 @@ public class Coordinator{
         public int id = -1;
     }
 
-    public static class StatusResponse{
-        public String home;
-        public int players, sectors, maxSectors, maxPlayers;
-        public String[] instances = {};
-    }
-
     private final Config config;
     private final Fi campaign, homeFile, stopFile;
     private final InstanceManager instances;
@@ -202,12 +194,16 @@ public class Coordinator{
     private long startedAt;
     private long lastAutosave;
     private long lastImportRefresh;
+    private long lastRunningWrite;
     private HttpServer http;
     private ExecutorService httpExecutor;
     private boolean shuttingDown;
     private Fi snapshotsDir;
     private Fi dailyDir;
     private volatile boolean restoring;
+    /** Atomic ownership of restore/company rewrites; `restoring` stays readable by polling code. */
+    private final AtomicBoolean restoreGate = new AtomicBoolean();
+    private static final int maxBodyBytes = 64 * 1024;
     /** Campaign-wide pause: no landing on new sectors while true. */
     private volatile boolean paused;
     private volatile boolean started;
@@ -324,6 +320,13 @@ public class Coordinator{
             snapshotsDir = (config.snapshotDir == null || config.snapshotDir.isEmpty())
                 ? campaign.parent().child("backups")
                 : Core.files.absolute(config.snapshotDir);
+            //a snapshot folder inside the campaign is copied into every snapshot and then
+            //deleted by a restore; keep it outside no matter what the config says
+            if(isInside(snapshotsDir, campaign)){
+                Log.err("[mp-sectors] snapshotDir @ is inside the campaign; using @",
+                    snapshotsDir.absolutePath(), campaign.parent().child("backups").absolutePath());
+                snapshotsDir = campaign.parent().child("backups");
+            }
             snapshotsDir.mkdirs();
             dailyDir = snapshotsDir.child("daily");
             dailyDir.mkdirs();
@@ -360,11 +363,16 @@ public class Coordinator{
             names[i] = players.get(i).plainName();
         }
         homePlayerNames = names;
+        instances.setHomePlayers(homePlayers);
 
         instances.tick();
         if(!restoring && home != null && home.loaded) home.checkCapture();
 
         long now = System.currentTimeMillis();
+        if(!restoring && now - lastRunningWrite >= 2000L){
+            lastRunningWrite = now;
+            writeRunningSectors();
+        }
         checkAttacks(now);
         enforcePlayerLimit(now);
 
@@ -378,8 +386,13 @@ public class Coordinator{
         }
 
         if(!restoring && !paused && pendingHome != null && homePlayers == 0){
-            switchHome(pendingHome);
+            String next = pendingHome;
             pendingHome = null;
+            if(instances.get(next) != null){
+                Log.warn("[mp-sectors] pending home @ is running as an instance; keeping the current home", next);
+            }else{
+                switchHome(next);
+            }
         }
 
         if(!restoring && config.autosaveSeconds > 0 && now - lastAutosave >= config.autosaveSeconds * 1000L){
@@ -405,6 +418,7 @@ public class Coordinator{
             if(Vars.net != null) Vars.net.closeServer();
         }catch(Throwable ignored){}
         try{
+            instances.freeze();
             instances.stopAll();
             if(home != null && home.loaded) home.save();
             saveChat();
@@ -422,6 +436,14 @@ public class Coordinator{
 
     /** @param prefix empty for a regular snapshot, "before-restore_" for the safety copy. */
     private boolean takeSnapshot(String prefix){
+        return takeSnapshot(prefix, null);
+    }
+
+    /**
+     * @param exclude a snapshot directory the caller is about to restore from: pruning must not
+     *                delete it before the copy completes.
+     */
+    private boolean takeSnapshot(String prefix, Fi exclude){
         if(snapshotsDir == null) return false;
 
         boolean ok = false;
@@ -448,12 +470,15 @@ public class Coordinator{
                 });
                 tmp.moveTo(dir);
 
-                pruneSnapshots();
+                pruneSnapshots(exclude);
 
                 //one snapshot per day, kept for a week: "go back to yesterday" without scrolling
                 String today = new SimpleDateFormat("yyyy-MM-dd").format(new Date());
                 Fi daily = dailyDir.child(today);
-                if(!daily.exists()){
+                //a same-day company switch must still get today's snapshot for the new company
+                boolean owned = daily.exists() && snapshotCompany(daily).equalsIgnoreCase(company);
+                if(!owned){
+                    if(daily.exists()) daily.deleteDirectory();
                     Fi dailyTmp = dailyDir.child("tmp-" + today);
                     dailyTmp.deleteDirectory();
                     SectorRunner.withCampaignLock(campaign, () -> {
@@ -461,7 +486,7 @@ public class Coordinator{
                         SectorRunner.writeAtomic(dailyTmp.child("company.txt"), company);
                     });
                     dailyTmp.moveTo(daily);
-                    pruneDaily();
+                    pruneDaily(exclude);
                     Log.info("[mp-sectors] daily snapshot @ created", today);
                 }
 
@@ -514,6 +539,7 @@ public class Coordinator{
     }
 
     private String snapshotJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         LandRequest req = JsonIO.read(LandRequest.class, body(ex));
 
         if(req == null || !Moderators.isModerator(req.player)){
@@ -529,9 +555,10 @@ public class Coordinator{
     /** Creates a snapshot on the game thread and waits for it (called from an HTTP thread). */
     private String snapshotBlocking(){
         CountDownLatch latch = new CountDownLatch(1);
+        final boolean[] created = {false};
         Core.app.post(() -> {
             try{
-                takeSnapshot();
+                created[0] = takeSnapshot();
             }finally{
                 latch.countDown();
             }
@@ -546,10 +573,11 @@ public class Coordinator{
             return "{\"ok\":false,\"error\":\"Создание снимка прервано.\"}";
         }
 
-        return "{\"ok\":true}";
+        return created[0] ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Не удалось создать снимок.\"}";
     }
 
     private String snapshotSectorsJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         RestoreRequest req = JsonIO.read(RestoreRequest.class, body(ex));
         if(req == null || req.name == null || !Moderators.isModerator(req.player)){
             return "{\"ok\":false,\"error\":\"Недостаточно прав.\"}";
@@ -557,6 +585,9 @@ public class Coordinator{
 
         Fi dir = findSnapshot(req.name);
         if(dir == null) return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+        if(!snapshotCompany(dir).equalsIgnoreCase(company)){
+            return "{\"ok\":false,\"error\":\"Этот снимок относится к другой компании.\"}";
+        }
 
         StringBuilder json = new StringBuilder("{\"ok\":true,\"sectors\":[");
         boolean first = true;
@@ -573,6 +604,7 @@ public class Coordinator{
     }
 
     private String snapshotCommentJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         RestoreRequest req = JsonIO.read(RestoreRequest.class, body(ex));
         if(req == null || req.name == null || !Moderators.isModerator(req.player)){
             return "{\"ok\":false,\"error\":\"Недостаточно прав.\"}";
@@ -580,6 +612,9 @@ public class Coordinator{
 
         Fi dir = findSnapshot(req.name);
         if(dir == null) return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+        if(!snapshotCompany(dir).equalsIgnoreCase(company)){
+            return "{\"ok\":false,\"error\":\"Этот снимок относится к другой компании.\"}";
+        }
 
         String comment = req.comment == null ? "" : req.comment.trim();
         if(comment.length() > 200) comment = comment.substring(0, 200);
@@ -596,37 +631,38 @@ public class Coordinator{
 
     /** Restores one sector from a snapshot; the home sector still needs the full restore. */
     private String restoreSectorJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         RestoreRequest req = JsonIO.read(RestoreRequest.class, body(ex));
         if(req == null || req.name == null || req.sector == null || !Moderators.isModerator(req.player)){
             return "{\"ok\":false,\"error\":\"Недостаточно прав.\"}";
         }
-        if(restoring) return "{\"ok\":false,\"error\":\"Кампания уже восстанавливается.\"}";
         if(req.sector.equals(homeSector)){
             return "{\"ok\":false,\"error\":\"Домашний сектор откатывается только целиком.\"}";
         }
         if(sectorForKey(req.sector) == null){
             return "{\"ok\":false,\"error\":\"Нет такого сектора.\"}";
         }
+        if(!beginRestore()) return "{\"ok\":false,\"error\":\"Кампания уже восстанавливается.\"}";
 
-        Fi dir = findSnapshot(req.name);
-        if(dir == null) return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
-        if(!snapshotCompany(dir).equalsIgnoreCase(company)){
-            return "{\"ok\":false,\"error\":\"Этот снимок относится к другой компании.\"}";
-        }
-        if(!validSnapshot(dir)) return "{\"ok\":false,\"error\":\"Снимок повреждён.\"}";
-
-        Fi srcSave = dir.child("sectors").child(req.sector + ".msav");
-        Fi srcInfo = dir.child("info").child(req.sector + ".json");
-        if(!srcSave.exists() || !srcInfo.exists()){
-            return "{\"ok\":false,\"error\":\"В снимке нет этого сектора.\"}";
-        }
-
-        restoring = true;
         try{
+            Fi dir = findSnapshot(req.name);
+            if(dir == null) return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+            if(!snapshotCompany(dir).equalsIgnoreCase(company)){
+                return "{\"ok\":false,\"error\":\"Этот снимок относится к другой компании.\"}";
+            }
+            if(!validSnapshot(dir)) return "{\"ok\":false,\"error\":\"Снимок повреждён.\"}";
+
+            Fi srcSave = dir.child("sectors").child(req.sector + ".msav");
+            Fi srcInfo = dir.child("info").child(req.sector + ".json");
+            if(!srcSave.exists() || !srcInfo.exists()){
+                return "{\"ok\":false,\"error\":\"В снимке нет этого сектора.\"}";
+            }
+
             InstanceManager.Instance inst = instances.get(req.sector);
             if(inst != null) instances.stop(req.sector);
 
-            takeSnapshot("before-restore_");
+            //do not let pruning delete the source before it is copied
+            takeSnapshot("before-restore_", dir);
 
             synchronized(campaignLock){
                 SectorRunner.withCampaignLock(campaign, () -> {
@@ -642,39 +678,39 @@ public class Coordinator{
             Log.err("[mp-sectors] could not restore sector @", req.sector, t);
             return "{\"ok\":false,\"error\":\"Ошибка восстановления сектора.\"}";
         }finally{
-            restoring = false;
+            endRestore();
         }
     }
 
     private String restoreJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         RestoreRequest req = JsonIO.read(RestoreRequest.class, body(ex));
 
-        if(req == null || req.name == null || !req.name.matches("(before-restore_)?[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2}")){
+        if(req == null || req.name == null || !validSnapshotName(req.name)){
             return "{\"ok\":false,\"error\":\"Некорректное имя снимка.\"}";
         }
         if(!Moderators.isModerator(req.player)){
             return "{\"ok\":false,\"error\":\"Снимки кампании доступны только модераторам.\"}";
         }
-        if(restoring){
+        if(!beginRestore()){
             return "{\"ok\":false,\"error\":\"Кампания уже восстанавливается.\"}";
         }
 
-        Fi dir = findSnapshot(req.name);
-        if(dir == null){
-            return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
-        }
-        if(!snapshotCompany(dir).equalsIgnoreCase(company)){
-            return "{\"ok\":false,\"error\":\"Этот снимок относится к другой компании.\"}";
-        }
-        if(!validSnapshot(dir)){
-            return "{\"ok\":false,\"error\":\"Снимок повреждён: в нём нет читаемых сохранений секторов.\"}";
-        }
-
-        restoring = true;
         Log.info("[mp-sectors] restoring campaign from snapshot @", req.name);
         Call.sendMessage("[accent]Кампания восстанавливается из снимка " + req.name + "...");
 
         try{
+            Fi dir = findSnapshot(req.name);
+            if(dir == null){
+                return "{\"ok\":false,\"error\":\"Снимок не найден.\"}";
+            }
+            if(!snapshotCompany(dir).equalsIgnoreCase(company)){
+                return "{\"ok\":false,\"error\":\"Этот снимок относится к другой компании.\"}";
+            }
+            if(!validSnapshot(dir)){
+                return "{\"ok\":false,\"error\":\"Снимок повреждён: в нём нет читаемых сохранений секторов.\"}";
+            }
+
             //instances save their sectors on stop; the snapshot is copied over them afterwards
             instances.freeze();
             instances.stopAll();
@@ -682,12 +718,12 @@ public class Coordinator{
 
             //the home autosaves on a timer, so its last minute would be lost by a rollback
             if(!saveHomeBlocking()){
-                restoring = false;
                 return "{\"ok\":false,\"error\":\"Не удалось сохранить домашний сектор перед восстановлением.\"}";
             }
 
-            //a rollback can itself be wrong; keep the state we are about to leave behind
-            takeSnapshot("before-restore_");
+            //a rollback can itself be wrong; keep the state we are about to leave behind, but
+            //never prune the snapshot being restored
+            takeSnapshot("before-restore_", dir);
 
             //build the restored campaign next to the live one, then swap: a failed copy
             //must not leave a half-deleted campaign
@@ -726,17 +762,18 @@ public class Coordinator{
             });
 
             if(!latch.await(90, TimeUnit.SECONDS)){
-                restoring = false;
                 return "{\"ok\":false,\"error\":\"Не удалось перезагрузить кампанию вовремя.\"}";
             }
 
+            //the snapshot's moderator list may predate the requester
+            ensureRequesterModerator(req.player);
             return "{\"ok\":true}";
         }catch(Throwable t){
-            restoring = false;
             Log.err("[mp-sectors] could not restore the campaign", t);
             return "{\"ok\":false,\"error\":\"Ошибка восстановления: " + esc(String.valueOf(t.getMessage())) + "\"}";
         }finally{
             instances.unfreeze();
+            endRestore();
         }
     }
 
@@ -843,8 +880,6 @@ public class Coordinator{
             Log.info("[mp-sectors] campaign restored, home=@", key);
         }catch(Throwable t){
             Log.err("[mp-sectors] could not reload the restored campaign", t);
-        }finally{
-            restoring = false;
         }
     }
 
@@ -877,6 +912,7 @@ public class Coordinator{
     }
 
     private Fi findSnapshot(String name){
+        if(!validSnapshotName(name)) return null;
         if(snapshotsDir != null){
             Fi dir = snapshotsDir.child(name);
             if(dir.exists() && dir.isDirectory()) return dir;
@@ -888,7 +924,19 @@ public class Coordinator{
         return null;
     }
 
+    /** Only names this coordinator creates; rejects path separators, ".." and absolute paths. */
+    private static boolean validSnapshotName(String name){
+        if(name == null || name.isEmpty() || name.length() > 80) return false;
+        if(name.contains("..") || name.contains("/") || name.contains("\\")) return false;
+        return name.matches("(before-restore_)?[0-9]{4}-[0-9]{2}-[0-9]{2}(_[0-9-]+)?");
+    }
+
     private void pruneSnapshots(){
+        pruneSnapshots(null);
+    }
+
+    /** @param exclude a snapshot the caller still needs (the restore source). */
+    private void pruneSnapshots(Fi exclude){
         //keep the limit per company: another company's snapshots must not evict this one's
         ObjectMap<String, ArrayList<Fi>> groups = new ObjectMap<>();
         for(Fi dir : snapshots()){
@@ -900,7 +948,14 @@ public class Coordinator{
 
         for(ArrayList<Fi> list : groups.values()){
             while(list.size() > maxSnapshots){
-                Fi oldest = list.remove(list.size() - 1);
+                Fi oldest = null;
+                for(int i = list.size() - 1; i >= 0; i--){
+                    if(exclude == null || !list.get(i).absolutePath().equals(exclude.absolutePath())){
+                        oldest = list.remove(i);
+                        break;
+                    }
+                }
+                if(oldest == null) break;
                 oldest.deleteDirectory();
                 validSnapshots.remove(oldest.name());
                 Log.info("[mp-sectors] removed old snapshot @", oldest.name());
@@ -909,6 +964,10 @@ public class Coordinator{
     }
 
     private void pruneDaily(){
+        pruneDaily(null);
+    }
+
+    private void pruneDaily(Fi exclude){
         ObjectMap<String, ArrayList<Fi>> groups = new ObjectMap<>();
         for(Fi dir : dailySnapshots()){
             String owner = snapshotCompany(dir);
@@ -919,7 +978,14 @@ public class Coordinator{
 
         for(ArrayList<Fi> list : groups.values()){
             while(list.size() > maxDailySnapshots){
-                Fi oldest = list.remove(list.size() - 1);
+                Fi oldest = null;
+                for(int i = list.size() - 1; i >= 0; i--){
+                    if(exclude == null || !list.get(i).absolutePath().equals(exclude.absolutePath())){
+                        oldest = list.remove(i);
+                        break;
+                    }
+                }
+                if(oldest == null) break;
                 oldest.deleteDirectory();
                 validSnapshots.remove(oldest.name());
                 Log.info("[mp-sectors] removed old daily snapshot @", oldest.name());
@@ -1062,6 +1128,17 @@ public class Coordinator{
         }
     }
 
+    /** @return true when child is the same path as, or below, parent. */
+    private static boolean isInside(Fi child, Fi parent){
+        try{
+            java.nio.file.Path c = child.file().toPath().toAbsolutePath().normalize();
+            java.nio.file.Path p = parent.file().toPath().toAbsolutePath().normalize();
+            return c.startsWith(p);
+        }catch(Throwable t){
+            return false;
+        }
+    }
+
     // ---------------- history, notes and cross-sector chat ----------------
 
     private static class HistoryList{
@@ -1140,10 +1217,15 @@ public class Coordinator{
 
     private String historyJson(HttpExchange ex) throws IOException{
         if("POST".equalsIgnoreCase(ex.getRequestMethod())){
+            //only the coordinator's own sector processes relay history, always over loopback
+            if(!isLoopback(ex)) return "{\"ok\":false,\"error\":\"Недостаточно прав.\"}";
             HistoryEvent req = JsonIO.read(HistoryEvent.class, body(ex));
             if(req == null || req.type == null || !req.type.matches("lost|capture|land|attack|defend|snapshot|restore|home|pads|note")){
                 return "{\"ok\":false}";
             }
+            if(req.text != null && req.text.length() > 500) req.text = req.text.substring(0, 500);
+            if(req.sector != null && req.sector.length() > 64) req.sector = req.sector.substring(0, 64);
+            if(req.player != null && req.player.length() > 64) req.player = req.player.substring(0, 64);
             if(req.type.matches("lost|capture|land|attack|defend")){
                 notifyEvent(req.type, req.sector, req.player, req.text);
             }else{
@@ -1171,8 +1253,12 @@ public class Coordinator{
     }
 
     private String noteJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         NoteRequest req = JsonIO.read(NoteRequest.class, body(ex));
-        Sector sector = req == null ? null : sector(req.planet, req.id);
+        if(req == null || !Moderators.isModerator(req.player)){
+            return "{\"ok\":false,\"error\":\"Заметки доступны только модераторам.\"}";
+        }
+        Sector sector = sector(req.planet, req.id);
         if(sector == null) return "{\"ok\":false,\"error\":\"Нет такого сектора.\"}";
 
         String key = req.planet + "-" + req.id;
@@ -1193,6 +1279,7 @@ public class Coordinator{
 
     /** Moderator controls: pause/speed, stop a sector, kick a player, manage moderators, read logs. */
     private String adminJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         AdminRequest req = JsonIO.read(AdminRequest.class, body(ex));
 
         if(req == null || !Moderators.isModerator(req.player)){
@@ -1402,12 +1489,22 @@ public class Coordinator{
     /** POST adds a line, GET returns everything newer than ?since=. */
     private String chatJson(HttpExchange ex) throws IOException{
         if("POST".equalsIgnoreCase(ex.getRequestMethod())){
+            //only the coordinator's own sector processes relay chat, always over loopback
+            if(!isLoopback(ex)) return "{\"ok\":false,\"error\":\"Недостаточно прав.\"}";
             ChatPost req = JsonIO.read(ChatPost.class, body(ex));
             if(req == null || req.message == null || req.message.isBlank()) return "{\"ok\":false}";
 
             //the client input is already limited, but direct requests are not
             if(req.message.length() > 300) req.message = req.message.substring(0, 300);
-            if(!allowChat(req.player, req.message)) return "{\"ok\":false,\"error\":\"Слишком много сообщений, подождите.\"}";
+            if(req.player != null && req.player.length() > 64) req.player = req.player.substring(0, 64);
+            if(req.sector != null && req.sector.length() > 64) req.sector = req.sector.substring(0, 64);
+
+            //relayed lines must come from a sector that is actually running and contain the
+            //player who is in it, otherwise one sector could impersonate another
+            if(!chatSectorValid(req.sector, req.player)){
+                return "{\"ok\":false,\"error\":\"Неверный сектор или игрок.\"}";
+            }
+            if(!allowChat(req.sector, req.player, req.message)) return "{\"ok\":false,\"error\":\"Слишком много сообщений, подождите.\"}";
 
             synchronized(chat){
                 ChatMessage message = new ChatMessage();
@@ -1463,12 +1560,32 @@ public class Coordinator{
         return json.toString();
     }
 
-    /** Sliding 10 s window: five relayed messages per player, and no identical line twice. */
-    private boolean allowChat(String player, String message){
-        String key = player == null || player.isEmpty() ? "?" : player;
+    /** True when the player is actually in the home or a running instance with that key. */
+    private boolean chatSectorValid(String sector, String player){
+        if(sector == null || sector.isEmpty() || player == null || player.isEmpty()) return false;
+        if(sector.equals(homeSector)) return nameIn(homePlayerNames, player);
+
+        InstanceManager.Instance inst = instances.get(sector);
+        return inst != null && !inst.stopping && nameIn(inst.playerNames, player);
+    }
+
+    private static boolean nameIn(String[] names, String name){
+        if(names == null || name == null) return false;
+        for(String other : names){
+            if(other != null && other.equalsIgnoreCase(name)) return true;
+        }
+        return false;
+    }
+
+    /** Sliding 10 s window: five relayed messages per sector/player, and no identical line twice. */
+    private boolean allowChat(String sector, String player, String message){
+        String key = (sector == null ? "?" : sector) + "|"
+            + (player == null || player.isEmpty() ? "?" : player.toLowerCase(java.util.Locale.ROOT));
         long now = System.currentTimeMillis();
 
         synchronized(chatRate){
+            pruneChatRate(now);
+
             long[] state = chatRate.get(key);
             if(state == null){
                 state = new long[]{now, 0};
@@ -1489,6 +1606,22 @@ public class Coordinator{
             state[1]++;
         }
         return true;
+    }
+
+    /** Keeps the rate-limit maps bounded; only reachable over loopback, but never unbounded. */
+    private void pruneChatRate(long now){
+        if(chatRate.size < 256) return;
+
+        Seq<String> stale = new Seq<>();
+        for(String key : chatRate.keys()){
+            long[] state = chatRate.get(key);
+            if(state == null || now - state[0] > chatWindow * 6) stale.add(key);
+        }
+        for(String key : stale){
+            chatRate.remove(key);
+            chatText.remove(key);
+            chatTextTime.remove(key);
+        }
     }
 
     /** The last 200 chat lines survive a coordinator restart and snapshot restores. */
@@ -1563,6 +1696,28 @@ public class Coordinator{
     }
 
     /** Notifies all sectors when a sector's attacked state flips. */
+    /** Publishes the live sector keys so an instance can avoid charging stale campaign info. */
+    private void writeRunningSectors(){
+        try{
+            StringBuilder json = new StringBuilder("[");
+            boolean first = true;
+            if(home != null && home.loaded && homeSector != null && !homeSector.isEmpty()){
+                json.append('"').append(esc(homeSector)).append('"');
+                first = false;
+            }
+            for(InstanceManager.Instance inst : instances.all()){
+                if(inst.stopping) continue;
+                if(!first) json.append(',');
+                json.append('"').append(esc(inst.sector)).append('"');
+                first = false;
+            }
+            json.append(']');
+            SectorRunner.writeAtomic(campaign.child("running.json"), json.toString());
+        }catch(Throwable t){
+            Log.err("[mp-sectors] could not publish running.json", t);
+        }
+    }
+
     private void checkAttacks(long now){
         if(now - lastAttackCheck < 2000L) return;
         lastAttackCheck = now;
@@ -1720,6 +1875,21 @@ public class Coordinator{
         return restoring;
     }
 
+    /** Only one restore/company rewrite may own the campaign; the owner clears it in finally. */
+    private boolean beginRestore(){
+        if(!restoreGate.compareAndSet(false, true)) return false;
+        restoring = true;
+        return true;
+    }
+
+    private void endRestore(){
+        try{
+            restoring = false;
+        }finally{
+            restoreGate.set(false);
+        }
+    }
+
     /** Sets the speed of the home and every running sector. */
     public void setSpeedAll(float speed, String player){
         broadcastCommand("speed", Float.toString(speed));
@@ -1758,7 +1928,9 @@ public class Coordinator{
         Player local = Groups.player.find(p -> p.plainName().equalsIgnoreCase(name));
         if(local != null && local.con != null) uuid = local.con.uuid;
 
-        long expires = hours > 0 ? System.currentTimeMillis() + hours * 60L * 60L * 1000L : 0;
+        //cap at 100 years so hours * 3600000 cannot overflow into a past/expired date
+        long capped = Math.min(Math.max(0, hours), 24L * 365L * 100L);
+        long expires = capped > 0 ? System.currentTimeMillis() + capped * 60L * 60L * 1000L : 0;
         Bans.add(name, uuid, reason, player, expires);
         addHistory("admin", "", player == null ? "" : player, "Бан: " + name
             + (reason == null || reason.isBlank() ? "" : " (" + reason + ")"));
@@ -1806,13 +1978,9 @@ public class Coordinator{
         return "Основная";
     }
 
-    private void writeCompany(String name){
-        try{
-            companiesDir.mkdirs();
-            SectorRunner.writeAtomic(companyFile, name);
-        }catch(Throwable t){
-            Log.err("[mp-sectors] could not write companies/current.txt", t);
-        }
+    private void writeCompany(String name) throws Exception{
+        companiesDir.mkdirs();
+        SectorRunner.writeAtomic(companyFile, name);
     }
 
     private ArrayList<Fi> companies(){
@@ -1859,14 +2027,12 @@ public class Coordinator{
     }
 
     private String companyCreate(String name, String player){
-        if(restoring) return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
-
         String safe = sanitizeCompany(name);
         if(safe == null) return "{\"ok\":false,\"error\":\"Имя компании: буквы, цифры, пробел, _ и - (до 40).\"}";
         if(safe.equalsIgnoreCase(company)) return "{\"ok\":false,\"error\":\"Эта компания уже активна.\"}";
         if(companiesDir.child(safe).exists()) return "{\"ok\":false,\"error\":\"Компания с таким именем уже есть.\"}";
+        if(!beginRestore()) return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
 
-        restoring = true;
         Log.info("[mp-sectors] creating company @", safe);
         try{
             instances.freeze();
@@ -1901,8 +2067,14 @@ public class Coordinator{
 
             swapCampaign(tmp);
 
-            company = safe;
-            writeCompany(safe);
+            //assign the in-memory company only after the file write succeeded
+            try{
+                writeCompany(safe);
+                company = safe;
+            }catch(Throwable t){
+                Log.err("[mp-sectors] company @ active but current.txt was not written", safe, t);
+            }
+
             if(!reloadHomeBlocking() || home == null || !home.loaded){
                 return "{\"ok\":false,\"error\":\"Компания создана, но домашний сектор не загрузился. Перезапустите координатор.\"}";
             }
@@ -1911,17 +2083,15 @@ public class Coordinator{
             Log.info("[mp-sectors] company @ created", safe);
             return "{\"ok\":true}";
         }catch(Throwable t){
-            restoring = false;
             Log.err("[mp-sectors] could not create company @", safe, t);
             return "{\"ok\":false,\"error\":\"Не удалось создать компанию: " + esc(String.valueOf(t.getMessage())) + "\"}";
         }finally{
             instances.unfreeze();
+            endRestore();
         }
     }
 
     private String companySwitch(String name, String player){
-        if(restoring) return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
-
         String safe = sanitizeCompany(name);
         if(safe == null) return "{\"ok\":false,\"error\":\"Некорректное имя компании.\"}";
         if(safe.equalsIgnoreCase(company)) return "{\"ok\":true}";
@@ -1930,8 +2100,8 @@ public class Coordinator{
         if(!target.exists() || !target.isDirectory()){
             return "{\"ok\":false,\"error\":\"Компания не найдена.\"}";
         }
+        if(!beginRestore()) return "{\"ok\":false,\"error\":\"Кампания восстанавливается, подождите.\"}";
 
-        restoring = true;
         Log.info("[mp-sectors] switching company @ -> @", company, safe);
         try{
             instances.freeze();
@@ -1954,8 +2124,14 @@ public class Coordinator{
                 deleteRequests();
             }
 
-            company = safe;
-            writeCompany(safe);
+            //assign the in-memory company only after the file write succeeded
+            try{
+                writeCompany(safe);
+                company = safe;
+            }catch(Throwable t){
+                Log.err("[mp-sectors] company @ active but current.txt was not written", safe, t);
+            }
+
             if(!reloadHomeBlocking() || home == null || !home.loaded){
                 return "{\"ok\":false,\"error\":\"Компания переключена, но домашний сектор не загрузился. Перезапустите координатор.\"}";
             }
@@ -1964,11 +2140,11 @@ public class Coordinator{
             Log.info("[mp-sectors] company @ is active", safe);
             return "{\"ok\":true}";
         }catch(Throwable t){
-            restoring = false;
             Log.err("[mp-sectors] could not switch to company @", safe, t);
             return "{\"ok\":false,\"error\":\"Не удалось переключить компанию: " + esc(String.valueOf(t.getMessage())) + "\"}";
         }finally{
             instances.unfreeze();
+            endRestore();
         }
     }
 
@@ -2120,47 +2296,73 @@ public class Coordinator{
 
     /** The home sector's core was destroyed: keep the save, mark it unowned, stop autosaving it. */
     public void homeLost(){
-        if(home == null || !home.loaded || restoring) return;
-        home.save();
-        home.markLost();
-        home.loaded = false;
-        notifyEvent("lost", homeSector, "", "Домашний сектор потерян");
+        if(home == null || !home.loaded) return;
+        if(!beginRestore()) return;
 
-        //do not keep serving a dead world on the home port until the coordinator restarts
-        for(Player player : Groups.player.copy()){
-            player.kick(KickReason.serverRestarting);
-        }
+        boolean posted = false;
         try{
-            if(Vars.net != null) Vars.net.closeServer();
-        }catch(Throwable t){
-            Log.err("[mp-sectors] could not close the home server", t);
-        }
+            home.save();
+            home.markLost();
+            home.loaded = false;
+            notifyEvent("lost", homeSector, "", "Домашний сектор потерян");
 
-        //a fresh campaign has no other lobby: reset the home to the starting sector and rebuild
-        //it instead of dead-ending until the coordinator is restarted
-        String start = startSectorKey();
-        if(start == null) start = initialStartKey();
-        if(start != null && !start.equals(homeSector)){
-            try{
-                writeHome(start);
-                Log.info("[mp-sectors] home lost; resetting the home to the starting sector @", start);
-            }catch(Throwable t){
-                Log.err("[mp-sectors] could not write the starting home @", start, t);
+            //do not keep serving a dead world on the home port until the coordinator restarts
+            for(Player player : Groups.player.copy()){
+                player.kick(KickReason.serverRestarting);
             }
+            try{
+                if(Vars.net != null) Vars.net.closeServer();
+            }catch(Throwable t){
+                Log.err("[mp-sectors] could not close the home server", t);
+            }
+
+            //a fresh campaign has no other lobby: reset the home to the starting sector and rebuild
+            //it instead of dead-ending until the coordinator is restarted
+            String start = startSectorKey();
+            if(start == null) start = initialStartKey();
+            if(start != null && !start.equals(homeSector)){
+                try{
+                    writeHome(start);
+                    Log.info("[mp-sectors] home lost; resetting the home to the starting sector @", start);
+                }catch(Throwable t){
+                    Log.err("[mp-sectors] could not write the starting home @", start, t);
+                }
+            }
+            Core.app.post(() -> {
+                try{
+                    reloadHome();
+                }finally{
+                    endRestore();
+                }
+            });
+            posted = true;
+        }finally{
+            if(!posted) endRestore();
         }
-        restoring = true;
-        Core.app.post(this::reloadHome);
     }
 
     /** The home sector was won: keep the base, record it and reload the world. */
     public void homeCaptured(){
-        if(home == null || !home.loaded) return;
-        home.save();
-        home.markCaptured();
-        notifyEvent("capture", homeSector, "", "Домашний сектор захвачен");
-        home.loaded = false;
-        //the vanilla game-over code may rotate to a built-in map; reload the real home after it
-        Core.app.post(this::reloadHome);
+        if(home == null || !home.loaded || !beginRestore()) return;
+
+        boolean posted = false;
+        try{
+            home.save();
+            home.markCaptured();
+            notifyEvent("capture", homeSector, "", "Домашний сектор захвачен");
+            home.loaded = false;
+            //the vanilla game-over code may rotate to a built-in map; reload the real home after it
+            Core.app.post(() -> {
+                try{
+                    reloadHome();
+                }finally{
+                    endRestore();
+                }
+            });
+            posted = true;
+        }finally{
+            if(!posted) endRestore();
+        }
     }
 
     // ---------------- http ----------------
@@ -2184,7 +2386,11 @@ public class Coordinator{
         http.createContext("/admin", ex -> respond(ex, handle(ex, this::adminJson)));
         http.createContext("/mods", ex -> respond(ex, handle(ex, this::modsJson)));
         http.createContext("/download", this::downloadMod);
-        httpExecutor = Executors.newFixedThreadPool(4);
+        httpExecutor = Executors.newCachedThreadPool(runnable -> {
+            Thread thread = new Thread(runnable, "mp-sectors-http");
+            thread.setDaemon(true);
+            return thread;
+        });
         http.setExecutor(httpExecutor);
         http.start();
     }
@@ -2196,9 +2402,17 @@ public class Coordinator{
     private String handle(HttpExchange ex, Handler handler){
         try{
             return handler.get(ex);
+        }catch(BodyTooLarge e){
+            return "{\"ok\":false,\"error\":\"Слишком большой запрос.\"}";
         }catch(Throwable t){
             Log.err("[mp-sectors] http error", t);
             return "{\"ok\":false,\"error\":\"internal error\"}";
+        }
+    }
+
+    private static class BodyTooLarge extends IOException{
+        BodyTooLarge(){
+            super("request body too large");
         }
     }
 
@@ -2219,14 +2433,49 @@ public class Coordinator{
     }
 
     private String body(HttpExchange ex) throws IOException{
-        return new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        byte[] bytes = ex.getRequestBody().readNBytes(maxBodyBytes + 1);
+        if(bytes.length > maxBodyBytes) throw new BodyTooLarge();
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    /** The configured token, or MP_SECTORS_HTTP_TOKEN (the launcher rewrites mp-coordinator.json). */
+    private String httpToken(){
+        if(config.httpToken != null && !config.httpToken.isEmpty()) return config.httpToken;
+        String env = System.getenv("MP_SECTORS_HTTP_TOKEN");
+        return env == null ? "" : env;
+    }
+
+    /** True when the request may mutate the campaign: no token configured, or the right one sent. */
+    private boolean tokenOk(HttpExchange ex){
+        String expected = httpToken();
+        if(expected.isEmpty()) return true;
+        String token = ex.getRequestHeaders().getFirst("X-MP-Token");
+        return token != null && token.equals(expected);
+    }
+
+    private static String tokenError(){
+        return "{\"ok\":false,\"error\":\"Неверный или отсутствующий токен координатора.\"}";
+    }
+
+    /** Requests relayed by the coordinator's own sector processes always arrive over loopback. */
+    private static boolean isLoopback(HttpExchange ex){
+        try{
+            var address = ex.getRemoteAddress().getAddress();
+            return address != null && address.isLoopbackAddress();
+        }catch(Throwable t){
+            return false;
+        }
     }
 
     /**
      * The host the client used to reach the coordinator (its Host header), without the port.
      * ex.getRemoteAddress() is the player's own address, which is useless for LAN/VPN clients.
+     * The header is caller-controlled, so it is only accepted when it looks like a host/IP;
+     * publicHost in the config overrides it.
      */
-    private static String requestHost(HttpExchange ex){
+    private String requestHost(HttpExchange ex){
+        if(config.publicHost != null && !config.publicHost.isEmpty()) return config.publicHost;
+
         String host = ex.getRequestHeaders().getFirst("Host");
 
         if(host == null || host.isEmpty()){
@@ -2237,32 +2486,29 @@ public class Coordinator{
 
         if(host.startsWith("[")){
             int end = host.indexOf(']');
-            return end > 0 ? host.substring(1, end) : host;
+            return end > 0 ? host.substring(1, end) : ex.getRemoteAddress().getAddress().getHostAddress();
         }
 
         int colon = host.lastIndexOf(':');
         if(colon > 0 && host.indexOf(':') == colon){
-            return host.substring(0, colon);
+            host = host.substring(0, colon);
         }
 
-        return host;
+        //a Host header must be a plain hostname or IP, never a URL/header injection
+        return host.matches("[A-Za-z0-9._-]+") ? host : ex.getRemoteAddress().getAddress().getHostAddress();
     }
 
     // ---------------- api ----------------
 
     private String sectorsJson(HttpExchange ex){
-        SectorsResponse out = new SectorsResponse();
-        out.home = homeSector;
-        out.maxSectors = config.maxSectors;
-        out.maxPlayers = config.maxPlayers;
-        out.players = homePlayers + instances.totalPlayers();
+        int totalPlayers = homePlayers + instances.totalPlayers();
 
         Snapshot snap = snapshot();
         Jval notes = readNotes();
         StringBuilder json = new StringBuilder("{\"home\":\"").append(esc(homeSector)).append("\",");
         json.append("\"maxSectors\":").append(config.maxSectors).append(',');
         json.append("\"maxPlayers\":").append(config.maxPlayers).append(',');
-        json.append("\"players\":").append(out.players).append(',');
+        json.append("\"players\":").append(totalPlayers).append(',');
         json.append("\"paused\":").append(paused).append(',');
         json.append("\"steamHost\":\"").append(esc(steamHost())).append("\",");
         json.append("\"steamId\":").append(SteamSupport.steamId()).append(',');
@@ -2289,7 +2535,9 @@ public class Coordinator{
                 int players = key.equals(homeSector) ? homePlayers
                     : (inst == null || inst.stopping ? 0 : inst.players);
                 boolean attacked = info != null && info.hasCore && (info.waves || info.attack);
-                boolean captured = info != null && info.hasCore && !info.waves && !info.attack;
+                //a captured start sector keeps waves endless, so wasCaptured is the real flag
+                boolean captured = info != null && (info.wasCaptured
+                    || (info.hasCore && !info.waves && !info.attack));
 
                 //the map asks for this list often; record a capture once, when it flips
                 synchronized(this){
@@ -2333,8 +2581,14 @@ public class Coordinator{
     }
 
     private String landJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         LandRequest req = JsonIO.read(LandRequest.class, body(ex));
         LandResponse out = new LandResponse();
+
+        if(req == null){
+            out.error = "Некорректный запрос.";
+            return landJson(out);
+        }
 
         Log.info("[mp-sectors] land request @-@ from @-@", req.planet, req.id, req.fromPlanet, req.fromId);
 
@@ -2358,9 +2612,91 @@ public class Coordinator{
         }
 
         Snapshot snap = snapshot();
+        boolean targetHasBase = snap.hasBase.get(key, false);
+        String sourceKey = sourceKey(req);
+        boolean homeAccelerator = sourceKey != null && sourceKey.equals(homeSector) && home != null && home.loaded;
 
-        //the interplanetary accelerator is the vanilla way to reach a new planet for the first time
-        if(!req.accelerator && !allowed(sector, snap)){
+        //the launch cost is computed here, never taken from the client: a forged cost string
+        //would mean a free core and free cargo
+        ItemSeq cost = new ItemSeq();
+        if(req.accelerator){
+            if(sourceKey == null || !snap.hasBase.get(sourceKey, false)){
+                out.error = "Ускоритель: исходный сектор не принадлежит кампании.";
+                return landJson(out);
+            }
+            //an instance's live accelerator tile cannot be verified from the coordinator, but
+            //we can still refuse client cargo and let that instance consume its own accelerator
+            if(!homeAccelerator && (req.tileX < 0 || req.tileY < 0)){
+                out.error = "Ускоритель не найден.";
+                return landJson(out);
+            }
+            if(req.loadout == null || req.loadout.isEmpty()){
+                out.error = "Не выбрана схема ядра для высадки.";
+                return landJson(out);
+            }
+
+            cost = loadoutRequirements(req);
+            if(cost == null){
+                out.error = "Не удалось прочитать схему ядра.";
+                return landJson(out);
+            }
+            if(!homeAccelerator && !sourceCanPay(sourceKey, cost, snap)){
+                out.error = "Недостаточно ресурсов для запуска.";
+                return landJson(out);
+            }
+        }else if(!targetHasBase){
+            //a new sector must be launched with a core schematic; otherwise it would be free
+            if(req.loadout == null || req.loadout.isEmpty()){
+                out.error = "Не выбрана схема ядра для высадки.";
+                return landJson(out);
+            }
+            cost = launchCost(req);
+            if(cost == null){
+                out.error = "Не удалось прочитать схему ядра.";
+                return landJson(out);
+            }
+            if(sourceKey == null || !snap.hasBase.get(sourceKey, false)){
+                out.error = "Исходный сектор не принадлежит кампании.";
+                return landJson(out);
+            }
+            if(!sourceCanPay(sourceKey, cost, snap)){
+                out.error = "Недостаточно ресурсов для запуска.";
+                return landJson(out);
+            }
+        }else if(req.loadout != null && !req.loadout.isEmpty()){
+            //an existing base ignores the loadout, but a client may still send one
+            cost = launchCost(req);
+            if(cost == null){
+                out.error = "Не удалось прочитать схему ядра.";
+                return landJson(out);
+            }
+            if(sourceKey == null || !snap.hasBase.get(sourceKey, false)){
+                out.error = "Исходный сектор не принадлежит кампании.";
+                return landJson(out);
+            }
+            if(!sourceCanPay(sourceKey, cost, snap)){
+                out.error = "Недостаточно ресурсов для запуска.";
+                return landJson(out);
+            }
+        }
+
+        //cargo the accelerator itself carries, minus the core requirements; verified on the home
+        String acceleratorCargo = null;
+        if(req.accelerator){
+            if(homeAccelerator){
+                acceleratorCargo = homeAcceleratorCargo(req.tileX, req.tileY, cost);
+                if(acceleratorCargo == null){
+                    out.error = "Ускоритель не найден или ещё не готов.";
+                    return landJson(out);
+                }
+            }else{
+                //the instance consumes its own accelerator; client cargo is never trusted
+                acceleratorCargo = "";
+            }
+        }
+
+        //req.accelerator is only true here after the source accelerator was verified above
+        if(!allowed(sector, snap, req.accelerator)){
             out.error = "Этот сектор ещё не открыт.";
             return landJson(out);
         }
@@ -2373,68 +2709,78 @@ public class Coordinator{
                 out.error = "Домашний сектор потерян: он пересобирается, попробуйте через несколько секунд.";
                 return landJson(out);
             }
+
+            if(req.accelerator){
+                consumeAcceleratorSource(sourceKey, req, homeAccelerator);
+                String items = acceleratorCargo;
+                if(items != null && !items.isEmpty()){
+                    Core.app.post(() -> {
+                        if(home != null && home.loaded) home.addCargo(items);
+                    });
+                }
+            }else if(!empty(cost)){
+                deductLaunch(sourceKey, itemsString(cost));
+            }
+
             out.ok = true;
             out.host = host;
             out.port = config.gamePort;
             out.home = true;
             out.steamHost = waitSteamHost();
             out.steamId = SteamSupport.steamId();
-            consumeLanding(req);
-
-            //an accelerator can also target an owned sector; its save ignores the loadout
-            if(req.accelerator && req.resources != null && !req.resources.isEmpty()){
-                String items = req.resources;
-                Core.app.post(() -> {
-                    if(home != null && home.loaded) home.addCargo(items);
-                });
-            }
             return landJson(out);
         }
 
-        InstanceManager.Instance inst = instances.get(key);
-        //a sector being stopped is still in the list; do not hand its dying port to the client
-        if(inst != null && inst.stopping) inst = null;
-
-        if(inst == null){
-            if(1 + instances.runningCount() + 1 > config.maxSectors){
-                out.error = "Места заняты: уже загружено " + config.maxSectors + " секторов.";
-                return landJson(out);
-            }
-
-            int total = homePlayers + instances.totalPlayers();
-            if(!isOnline(req.player) && total >= config.maxPlayers){
-                out.error = "Места заняты: на сервере уже " + config.maxPlayers + " игроков.";
-                return landJson(out);
-            }
-
-            inst = instances.start(key, req.loadout, req.resources);
-            if(inst == null){
-                out.error = "Не удалось запустить сектор.";
-                return landJson(out);
-            }
-        }
-
-        //another player may be landing on the same sector right now
-        if(!inst.ready){
-            inst = instances.waitReady(inst, 45_000L);
-            if(inst == null){
-                out.error = "Не удалось запустить сектор.";
-                return landJson(out);
-            }
-        }
-
-        //an admin may have stopped this sector while another player was landing
-        if(inst.stopping){
-            out.error = "Сектор останавливается, попробуйте ещё раз.";
+        InstanceManager.Instance inst;
+        boolean startedWithAcceleratorCargo = false;
+        InstanceManager.Reservation reservation = instances.reserveWaiting(key, isOnline(req.player));
+        if(reservation == null){
+            out.error = "Места заняты: уже загружено " + config.maxSectors + " секторов или на сервере "
+                + config.maxPlayers + " игроков.";
             return landJson(out);
         }
+        try{
+            inst = reservation.instance;
+            if(inst == null){
+                //for an accelerator launch the sector starts with only the verified cargo, never
+                //with the client-supplied amount
+                String resources = req.accelerator ? acceleratorCargo : req.resources;
+                inst = instances.start(reservation, req.loadout, resources);
+                if(inst == null){
+                    out.error = "Не удалось запустить сектор.";
+                    return landJson(out);
+                }
+                startedWithAcceleratorCargo = req.accelerator;
+            }
 
-        //consume the launch source even when the target sector was already running
-        consumeLanding(req);
+            //another player may be landing on the same sector right now
+            if(!inst.ready){
+                inst = instances.waitReady(inst, 45_000L);
+                if(inst == null){
+                    out.error = "Не удалось запустить сектор.";
+                    return landJson(out);
+                }
+            }
 
-        //target already has a base: its save ignores the launch loadout, so deliver the cargo
-        if(req.accelerator && req.resources != null && !req.resources.isEmpty() && snap.hasBase.get(key, false)){
-            command(inst.sector, "cargo", req.resources);
+            //an admin may have stopped this sector while another player was landing
+            if(inst.stopping){
+                out.error = "Сектор останавливается, попробуйте ещё раз.";
+                return landJson(out);
+            }
+        }finally{
+            instances.release(reservation);
+        }
+
+        if(req.accelerator){
+            consumeAcceleratorSource(sourceKey, req, homeAccelerator);
+            //a newly generated sector already received the verified cargo in start(); an
+            //existing base ignores the launch resources, so the live core needs the command
+            if(acceleratorCargo != null && !acceleratorCargo.isEmpty()
+                && (!startedWithAcceleratorCargo || targetHasBase)){
+                command(inst.sector, "cargo", acceleratorCargo);
+            }
+        }else if(!empty(cost)){
+            deductLaunch(sourceKey, itemsString(cost));
         }
 
         notifyEvent("land", key, req.player, "Высадка в сектор");
@@ -2478,37 +2824,174 @@ public class Coordinator{
         return steamHost();
     }
 
-    /** Removes the accelerator / launch cost from the sector the player is leaving. */
-    private void consumeLanding(LandRequest req){
-        if(req.accelerator && req.fromId >= 0 && req.tileX >= 0 && req.tileY >= 0){
-            consumeAccelerator(req.fromPlanet, req.fromId, req.tileX, req.tileY);
-        }else if(req.cost != null && !req.cost.isEmpty() && req.fromId >= 0){
-            deductLaunch(req.fromPlanet, req.fromId, req.cost);
+    /** The key of the sector the player is leaving, or null when the request carries none. */
+    private static String sourceKey(LandRequest req){
+        if(req.fromPlanet == null || req.fromPlanet.isEmpty() || req.fromId < 0) return null;
+        return req.fromPlanet + "-" + req.fromId;
+    }
+
+    /** Core requirements of the launch schematic, or null when the schematic is unusable. */
+    private static ItemSeq loadoutRequirements(LandRequest req){
+        if(req.loadout == null || req.loadout.isEmpty()) return new ItemSeq();
+        try{
+            Schematic schem = Schematics.readBase64(req.loadout);
+            if(schem == null || schem.findCore() == null) return null;
+            return schem.requirements();
+        }catch(Throwable t){
+            return null;
+        }
+    }
+
+    /** The full cost of a launch: the core requirements plus the cargo being carried. */
+    private static ItemSeq launchCost(LandRequest req){
+        ItemSeq requirements = loadoutRequirements(req);
+        if(requirements == null) return null;
+
+        ItemSeq cost = new ItemSeq();
+        cost.add(requirements);
+        cost.add(parseItemSeq(req.resources));
+        return cost;
+    }
+
+    /**
+     * A live home is checked against its real core; a running instance only has its last saved
+     * info, and a stopped sector has no live core to charge at all.
+     */
+    private boolean sourceCanPay(String key, ItemSeq cost, Snapshot snap){
+        if(empty(cost)) return true;
+        if(key.equals(homeSector)) return homeCanPay(cost);
+
+        InstanceManager.Instance inst = instances.get(key);
+        if(inst == null || inst.stopping) return false;
+
+        SectorInfo info = snap.info.get(key);
+        return info != null && info.hasCore && info.items != null && info.items.has(cost);
+    }
+
+    private boolean homeCanPay(ItemSeq cost){
+        Boolean fits = onGameThread(() -> {
+            if(home == null || !home.loaded) return false;
+            if(Vars.state == null || Vars.state.rules == null) return false;
+            var core = Vars.state.rules.defaultTeam.core();
+            if(core == null) return false;
+
+            final boolean[] ok = {true};
+            cost.each((item, amount) -> {
+                if(core.items.get(item) < amount) ok[0] = false;
+            });
+            return ok[0];
+        }, 10_000L);
+        return Boolean.TRUE.equals(fits);
+    }
+
+    /**
+     * Reads the verified accelerator cargo on the game thread: its items minus the core
+     * requirements. Null means the tile is not a ready accelerator.
+     */
+    private String homeAcceleratorCargo(int x, int y, ItemSeq requirements){
+        return onGameThread(() -> {
+            if(home == null || !home.loaded || Vars.world == null) return null;
+
+            var build = Vars.world.build(x, y);
+            if(!(build instanceof Accelerator.AcceleratorBuild acc)) return null;
+            if(acc.progress < 1f && acc.items.total() <= 0) return null;
+
+            ItemSeq cargo = new ItemSeq();
+            acc.items.each(cargo::add);
+            //a ready accelerator must actually carry the core requirements; otherwise the
+            //destination core would be built for free
+            if(requirements != null && !cargo.has(requirements)) return null;
+            if(requirements != null) requirements.each((item, amount) -> cargo.remove(item, amount));
+            return itemsString(cargo);
+        }, 10_000L);
+    }
+
+    private void consumeHomeAccelerator(int x, int y){
+        Core.app.post(() -> {
+            if(home != null && home.loaded) home.consumeAccelerator(x, y);
+        });
+    }
+
+    private void consumeAcceleratorSource(String sourceKey, LandRequest req, boolean homeAccelerator){
+        if(homeAccelerator){
+            consumeHomeAccelerator(req.tileX, req.tileY);
+        }else if(sourceKey != null && req.fromId >= 0){
+            writeRequest("accelerator", "{\"sector\":\"" + esc(sourceKey) + "\",\"x\":" + req.tileX
+                + ",\"y\":" + req.tileY + ",\"time\":" + System.currentTimeMillis() + "}");
         }
     }
 
     /** Removes the loadout cost from the launch source: live for the home, via a request file for instances. */
-    private void deductLaunch(String fromPlanet, int fromId, String cost){
-        String key = fromPlanet + "-" + fromId;
-        if(key.equals(homeSector)){
+    private void deductLaunch(String fromKey, String cost){
+        if(fromKey == null || cost == null || cost.isEmpty()) return;
+        if(fromKey.equals(homeSector)){
             Core.app.post(() -> {
                 if(home != null && home.loaded) home.deduct(cost);
             });
         }else{
-            writeRequest("launch", "{\"sector\":\"" + esc(key) + "\",\"cost\":\"" + esc(cost) + "\",\"time\":" + System.currentTimeMillis() + "}");
+            writeRequest("launch", "{\"sector\":\"" + esc(fromKey) + "\",\"cost\":\"" + esc(cost) + "\",\"time\":" + System.currentTimeMillis() + "}");
         }
     }
 
-    /** Consumes the interplanetary accelerator in the launch source. */
-    private void consumeAccelerator(String fromPlanet, int fromId, int x, int y){
-        String key = fromPlanet + "-" + fromId;
-        if(key.equals(homeSector)){
-            Core.app.post(() -> {
-                if(home != null && home.loaded) home.consumeAccelerator(x, y);
-            });
-        }else{
-            writeRequest("accelerator", "{\"sector\":\"" + esc(key) + "\",\"x\":" + x + ",\"y\":" + y + ",\"time\":" + System.currentTimeMillis() + "}");
+    private static boolean empty(ItemSeq seq){
+        return seq == null || seq.total <= 0;
+    }
+
+    private static ItemSeq parseItemSeq(String list){
+        ItemSeq seq = new ItemSeq();
+        if(list == null || list.isEmpty()) return seq;
+
+        for(String pair : list.split(",")){
+            int split = pair.indexOf(':');
+            if(split <= 0) continue;
+
+            var content = Vars.content.byName(pair.substring(0, split).trim());
+            if(!(content instanceof Item item)) continue;
+
+            try{
+                int amount = Integer.parseInt(pair.substring(split + 1).trim());
+                if(amount > 0 && amount <= 100_000) seq.add(item, amount);
+            }catch(NumberFormatException ignored){
+            }
         }
+        return seq;
+    }
+
+    private static String itemsString(ItemSeq seq){
+        StringBuilder out = new StringBuilder();
+        seq.each((item, amount) -> {
+            if(amount > 0){
+                if(out.length() > 0) out.append(',');
+                out.append(item.name).append(':').append(amount);
+            }
+        });
+        return out.toString();
+    }
+
+    /** Runs a supplier on the game thread and waits; HTTP handlers must not touch the world directly. */
+    private static <T> T onGameThread(Supplier<T> action, long timeoutMs){
+        CountDownLatch latch = new CountDownLatch(1);
+        final Object[] result = new Object[1];
+        Core.app.post(() -> {
+            try{
+                result[0] = action.get();
+            }catch(Throwable t){
+                Log.err("[mp-sectors] game-thread task failed", t);
+            }finally{
+                latch.countDown();
+            }
+        });
+
+        try{
+            if(!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) return null;
+        }catch(InterruptedException e){
+            Thread.currentThread().interrupt();
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        T value = (T)result[0];
+        return value;
     }
 
     /**
@@ -2549,7 +3032,9 @@ public class Coordinator{
     }
 
     private String homeJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         LandRequest req = JsonIO.read(LandRequest.class, body(ex));
+        if(req == null) return "{\"ok\":false,\"error\":\"Некорректный запрос.\"}";
         Sector sector = sector(req.planet, req.id);
         if(sector == null) return "{\"ok\":false,\"error\":\"Нет такого сектора.\"}";
 
@@ -2557,6 +3042,11 @@ public class Coordinator{
         if(paused) return "{\"ok\":false,\"error\":\"Кампания на паузе: смена дома запрещена.\"}";
 
         String key = req.planet + "-" + req.id;
+
+        //two processes must not autosave the same sector save/info files
+        if(instances.get(key) != null || instances.isStarting(key)){
+            return "{\"ok\":false,\"error\":\"Сектор запущен как экземпляр: остановите его перед сменой дома.\"}";
+        }
 
         //a sector without a core cannot become the home; writing home.json anyway would
         //point the next coordinator start at a lost sector
@@ -2586,7 +3076,9 @@ public class Coordinator{
 
     /** Points every sector's launch pads at one destination sector. */
     private String padsJson(HttpExchange ex) throws IOException{
+        if(!tokenOk(ex)) return tokenError();
         LandRequest req = JsonIO.read(LandRequest.class, body(ex));
+        if(req == null) return "{\"ok\":false,\"error\":\"Некорректный запрос.\"}";
         Sector sector = sector(req.planet, req.id);
         if(sector == null) return "{\"ok\":false,\"error\":\"Нет такого сектора.\"}";
 
@@ -2595,44 +3087,45 @@ public class Coordinator{
         Snapshot snap = snapshot();
         if(!allowed(sector, snap)) return "{\"ok\":false,\"error\":\"Этот сектор ещё не открыт.\"}";
 
-        int updated = 0;
-        for(Fi file : campaign.child("info").list()){
-            if(!file.extension().equals("json")) continue;
-            //launch pads only work inside one planet
-            if(!file.nameWithoutExtension().startsWith(req.planet + "-")) continue;
-            try{
-                SectorInfo info = JsonIO.read(SectorInfo.class, file.readString());
-                if(info == null) continue;
-                info.destination = sector;
-                SectorRunner.writeAtomic(file, JsonIO.write(info));
-                updated++;
-            }catch(Throwable t){
-                Log.err("[mp-sectors] could not update launch destination in @", file.name());
+        final int[] updated = {0};
+        //the instance autosave rewrites the same info files; share its cross-process lock
+        SectorRunner.withCampaignLock(campaign, () -> {
+            for(Fi file : campaign.child("info").list()){
+                if(!file.extension().equals("json")) continue;
+                //launch pads only work inside one planet
+                if(!file.nameWithoutExtension().startsWith(req.planet + "-")) continue;
+                try{
+                    SectorInfo info = JsonIO.read(SectorInfo.class, file.readString());
+                    if(info == null) continue;
+                    info.destination = sector;
+                    SectorRunner.writeAtomic(file, JsonIO.write(info));
+                    updated[0]++;
+                }catch(Throwable t){
+                    Log.err("[mp-sectors] could not update launch destination in @", file.name());
+                }
             }
-        }
+        });
 
-        if(home != null && home.loaded && home.sector() != null && home.sector().planet.name.equals(req.planet)){
-            home.sector().info.destination = sector;
-        }
+        Core.app.post(() -> {
+            if(home != null && home.loaded && home.sector() != null && home.sector().planet.name.equals(req.planet)){
+                home.sector().info.destination = sector;
+            }
+        });
 
         //instances poll this file and apply the same destination to their live sector
         SectorRunner.writeAtomic(campaign.child("pads.json"), "{\"planet\":\"" + esc(req.planet) + "\",\"id\":" + req.id + "}");
         addHistory("pads", req.planet + "-" + req.id, req.player, "Пусковые площадки направлены на " + req.planet + "-" + req.id);
-        Log.info("[mp-sectors] launch pads directed to @ (@ sectors updated)", req.planet + "-" + req.id, updated);
+        Log.info("[mp-sectors] launch pads directed to @ (@ sectors updated)", req.planet + "-" + req.id, updated[0]);
         return "{\"ok\":true}";
     }
 
     private String statusJson(HttpExchange ex){
-        StatusResponse out = new StatusResponse();
-        out.home = homeSector;
-        out.players = homePlayers + instances.totalPlayers();
-        out.sectors = 1 + instances.runningCount();
-        out.maxSectors = config.maxSectors;
-        out.maxPlayers = config.maxPlayers;
+        int players = homePlayers + instances.totalPlayers();
+        int sectors = 1 + instances.runningCount();
 
         StringBuilder json = new StringBuilder("{\"home\":\"").append(esc(homeSector)).append("\",");
-        json.append("\"players\":").append(out.players).append(',');
-        json.append("\"sectors\":").append(out.sectors).append(',');
+        json.append("\"players\":").append(players).append(',');
+        json.append("\"sectors\":").append(sectors).append(',');
         json.append("\"maxSectors\":").append(config.maxSectors).append(',');
         json.append("\"maxPlayers\":").append(config.maxPlayers).append(',');
         json.append("\"paused\":").append(paused).append(',');
@@ -2976,14 +3469,30 @@ public class Coordinator{
     }
 
     private synchronized boolean allowed(Sector sector, Snapshot snap){
+        return allowed(sector, snap, false);
+    }
+
+    /**
+     * @param accelerator true only after the coordinator verified a real, ready accelerator;
+     *                    a client flag alone never reaches this branch.
+     */
+    private synchronized boolean allowed(Sector sector, Snapshot snap, boolean accelerator){
         if(!sector.planet.accessible || !sector.planet.visible || sector.planet.generator == null) return false;
 
         //already yours
         if(snap.hasBase.get(sector.planet.name + "-" + sector.id, false)) return true;
 
-        //another planet is only reachable through a base there
+        //a verified interplanetary accelerator is the intended way to a different planet
+        if(accelerator){
+            Planet homePlanet = campaignPlanet();
+            if(homePlanet != null && sector.planet == homePlanet) return false;
+            return !sector.isShielded();
+        }
+
+        //another planet is reachable once any sector there has a base (accelerator landing)
         Planet homePlanet = campaignPlanet();
-        if(homePlanet != null && sector.planet != homePlanet) return false;
+        boolean ownPlanet = homePlanet != null && sector.planet == homePlanet;
+        if(!ownPlanet && !hasBaseOnPlanet(snap, sector.planet)) return false;
 
         //the starting sector is always available
         if(sector.id == sector.planet.startSector) return true;
@@ -3005,6 +3514,14 @@ public class Coordinator{
         //numbered sectors (including submission presets): only after a better core, next to a base
         if(!Blocks.coreFoundation.unlocked() && !Blocks.coreNucleus.unlocked()) return false;
         return nearBase;
+    }
+
+    private static boolean hasBaseOnPlanet(Snapshot snap, Planet planet){
+        String prefix = planet.name + "-";
+        for(String key : snap.hasBase.keys()){
+            if(key.startsWith(prefix) && snap.hasBase.get(key, false)) return true;
+        }
+        return false;
     }
 
     private @Nullable Planet campaignPlanet(){
@@ -3034,11 +3551,11 @@ public class Coordinator{
     private boolean isOnline(String name){
         if(name == null || name.isEmpty()) return false;
         for(mindustry.gen.Player player : Groups.player.copy()){
-            if(player.plainName().equals(name)) return true;
+            if(player.plainName().equalsIgnoreCase(name)) return true;
         }
         for(InstanceManager.Instance inst : instances.all()){
             for(String other : inst.playerNames){
-                if(other != null && other.equals(name)) return true;
+                if(other != null && other.equalsIgnoreCase(name)) return true;
             }
         }
         return false;
@@ -3160,20 +3677,7 @@ public class Coordinator{
             return start;
         }
 
-        Fi best = null;
-        for(Fi save : campaign.child("sectors").list()){
-            if(!save.extension().equals("msav")) continue;
-            if(best == null || save.file().lastModified() > best.file().lastModified()) best = save;
-        }
-        if(best == null) return null;
-
-        String key = best.nameWithoutExtension();
-        try{
-            writeHome(key);
-        }catch(Throwable t){
-            Log.err("[mp-sectors] could not record the home sector @", key, t);
-        }
-        return key;
+        return null;
     }
 
     private void writeHome(String key){
@@ -3185,6 +3689,13 @@ public class Coordinator{
 
     private void switchHome(String key){
         if(key.equals(homeSector)) return;
+
+        //another process autosaving the same sector would fight this runner
+        if(instances.get(key) != null || instances.isStarting(key)){
+            Log.warn("[mp-sectors] refusing to switch home to running/booting instance @", key);
+            if(homeSector != null) writeHome(homeSector);
+            return;
+        }
 
         String previous = homeSector;
         Log.info("[mp-sectors] switching home sector @ -> @", homeSector, key);
@@ -3205,8 +3716,16 @@ public class Coordinator{
                     home = back;
                     homeSector = previous;
                 }else{
-                    Log.err("[mp-sectors] could not restore the previous home @", previous);
+                    Log.err("[mp-sectors] could not restore the previous home @; closing the server", previous);
                     home = null;
+                    for(Player player : Groups.player.copy()){
+                        player.kick(KickReason.serverRestarting);
+                    }
+                    try{
+                        if(Vars.net != null) Vars.net.closeServer();
+                    }catch(Throwable t){
+                        Log.err("[mp-sectors] could not close the home server", t);
+                    }
                 }
             }
             return;

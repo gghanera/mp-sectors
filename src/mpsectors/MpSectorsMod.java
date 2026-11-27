@@ -32,7 +32,8 @@ import mindustry.net.Packets.KickReason;
 import mindustry.server.ServerControl;
 import mindustry.type.Planet;
 import mindustry.type.Sector;
-import mindustry.world.blocks.LaunchAnimator;
+import mindustry.world.blocks.campaign.Accelerator;
+import mindustry.world.blocks.storage.CoreBlock;
 
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -58,12 +59,14 @@ public class MpSectorsMod extends Mod{
     private boolean instanceMode;
     private int chatPort;
     private String chatSector = "";
-    private String lastChatPlayer = "", lastChatMessage = "";
+    private String lastChatWho = "", lastChatMessage = "";
     private long lastChatTime;
     private final ObjectMap<String, long[]> chatRates = new ObjectMap<>();
     private long lastAutosave, lastStopCheck, lastStatus;
     private long lastUnlockCheck, lastUnlocksModified;
     private long lastImportRefresh, lastPadsPoll, lastPadsCheck, lastLaunchPoll;
+    private int lastAccelX = -1, lastAccelY = -1;
+    private long lastAccelTime;
 
     //Time Control support: the client sends the speed chosen in the mod, the server simulates at it
     private static final String speedPacket = "mpcampaign-speed";
@@ -117,7 +120,12 @@ public class MpSectorsMod extends Mod{
             if(e.player.con != null) Call.clientPacketReliable(e.player.con, speedPacket, Float.toString(gameSpeed));
         });
         Events.on(PlayerLeave.class, e -> {
-            if(instanceMode && runner != null && runner.loaded && Groups.player.size() == 0) runner.save();
+            if(!instanceMode || runner == null || !runner.loaded) return;
+            //PlayerLeave fires before the player is removed from Groups.player, so on a one-player
+            //instance the count is still 1 here: defer the check instead of never saving
+            Core.app.post(() -> {
+                if(instanceMode && runner != null && runner.loaded && Groups.player.isEmpty()) runner.save();
+            });
         });
         Events.on(PlayerChatEvent.class, e -> {
             if(e.player == null || e.message == null || e.message.isEmpty()) return;
@@ -125,11 +133,14 @@ public class MpSectorsMod extends Mod{
             //commands are not chat; the event fires before command handling
             if(e.message.startsWith("/")) return;
 
-            //a graphical host can fire this twice for one message
+            //a graphical host can fire this twice for one message; dedup by connection uuid, so two
+            //players sharing a plain name (or one repeating "ok") are not silently dropped
             long now = System.currentTimeMillis();
             String name = e.player.plainName();
-            if(name.equals(lastChatPlayer) && e.message.equals(lastChatMessage) && now - lastChatTime < 1000L) return;
-            lastChatPlayer = name;
+            String uuid = e.player.uuid();
+            String who = uuid.isEmpty() ? "name:" + name : uuid;
+            if(who.equals(lastChatWho) && e.message.equals(lastChatMessage) && now - lastChatTime < 1000L) return;
+            lastChatWho = who;
             lastChatMessage = e.message;
             lastChatTime = now;
 
@@ -168,8 +179,10 @@ public class MpSectorsMod extends Mod{
 
             if(!instanceMode || runner == null || !runner.loaded) return;
             Sector now = Vars.state.getSector();
-            if(now != null && now != runner.sector()){
-                Log.err("[mp-sectors] instance switched to @ instead of @, saving disabled. Restart the instance.", now, runner.sectorName);
+            //a built-in map has no sector at all; saving it would overwrite the campaign save
+            if(now == null || now != runner.sector()){
+                Log.err("[mp-sectors] instance switched to @ instead of @, saving disabled. Restart the instance.",
+                    now == null ? "a built-in map" : now, runner.sectorName);
                 runner.loaded = false;
             }
         });
@@ -215,7 +228,12 @@ public class MpSectorsMod extends Mod{
 
         handler.register("speedall", "<x>", "Set the speed of the whole campaign.", args -> {
             try{
-                speedAll(null, Float.parseFloat(args[0]));
+                float speed = Float.parseFloat(args[0]);
+                if(!Float.isFinite(speed)){
+                    Log.err("[mp-sectors] speedall must be a finite number, e.g. 4 or 0.5");
+                    return;
+                }
+                speedAll(null, speed);
             }catch(NumberFormatException e){
                 Log.err("[mp-sectors] speedall must be a number, e.g. 4 or 0.5");
             }
@@ -223,7 +241,12 @@ public class MpSectorsMod extends Mod{
 
         handler.register("speed", "<x>", "Set campaign game speed, e.g. 4 or 0.5.", args -> {
             try{
-                setGameSpeed(Float.parseFloat(args[0]), true);
+                float speed = Float.parseFloat(args[0]);
+                if(!Float.isFinite(speed)){
+                    Log.err("[mp-sectors] speed must be a finite number, e.g. 4 or 0.5");
+                    return;
+                }
+                setGameSpeed(speed, true);
             }catch(NumberFormatException e){
                 Log.err("[mp-sectors] speed must be a number, e.g. 4 or 0.5");
             }
@@ -243,8 +266,12 @@ public class MpSectorsMod extends Mod{
             }
 
             if(args[0].equalsIgnoreCase("add")){
-                Log.info("[mp-sectors] @ is now a moderator.", args[1]);
-                if(!Moderators.add(args[1])) Log.info("[mp-sectors] @ was already a moderator.", args[1]);
+                //log the real result: add() returns false when the name is already a moderator
+                if(Moderators.add(args[1])){
+                    Log.info("[mp-sectors] @ is now a moderator.", args[1]);
+                }else{
+                    Log.info("[mp-sectors] @ was already a moderator.", args[1]);
+                }
             }else if(args[0].equalsIgnoreCase("remove")){
                 if(!Moderators.isModerator(args[1])){
                     Log.err("[mp-sectors] @ is not a moderator.", args[1]);
@@ -298,7 +325,13 @@ public class MpSectorsMod extends Mod{
                 return;
             }
             try{
-                setGameSpeed(Float.parseFloat(args[0]), true);
+                float speed = Float.parseFloat(args[0]);
+                //Float.parseFloat accepts "NaN"/"Infinity"; those would freeze the world
+                if(!Float.isFinite(speed)){
+                    if(player != null) player.sendMessage("[scarlet]Скорость должна быть числом, например 4 или 0.5.");
+                    return;
+                }
+                setGameSpeed(speed, true);
             }catch(NumberFormatException e){
                 if(player != null) player.sendMessage("[scarlet]Скорость должна быть числом, например 4 или 0.5.");
             }
@@ -334,7 +367,7 @@ public class MpSectorsMod extends Mod{
 
     /** Plays the vanilla launch animation for every client in this sector. */
     private void handleAcceleratorPacket(Player player, String data){
-        if(data == null) return;
+        if(player == null || data == null) return;
         String[] parts = data.split(",");
         if(parts.length != 2) return;
 
@@ -342,8 +375,20 @@ public class MpSectorsMod extends Mod{
             int x = Integer.parseInt(parts[0].trim());
             int y = Integer.parseInt(parts[1].trim());
 
-            //cores launch from the map, accelerators from their block: both are LaunchAnimators
-            if(!(Vars.world.build(x, y) instanceof LaunchAnimator)) return;
+            //cores launch from the map, accelerators from their block: both are LaunchAnimators,
+            //but the animation is broadcast to the whole sector, so only the sender's own core or a
+            //real accelerator of their team may trigger it - never an arbitrary launch-animator tile
+            var build = Vars.world.build(x, y);
+            if(!(build instanceof Accelerator.AcceleratorBuild) && !(build instanceof CoreBlock.CoreBuild)) return;
+            if(build.team != player.team()) return;
+
+            //one animation per second and tile: a client cannot spam global launch effects
+            long now = System.currentTimeMillis();
+            if(x == lastAccelX && y == lastAccelY && now - lastAccelTime < 1000L) return;
+            lastAccelX = x;
+            lastAccelY = y;
+            lastAccelTime = now;
+
             Call.clientPacketReliable(acceleratorAnimPacket, x + "," + y);
         }catch(NumberFormatException ignored){
         }
@@ -360,7 +405,10 @@ public class MpSectorsMod extends Mod{
         }
 
         try{
-            setGameSpeed(Float.parseFloat(data.trim()));
+            float speed = Float.parseFloat(data.trim());
+            //parseFloat accepts NaN/Infinity; never let those reach Time.setDeltaProvider
+            if(!Float.isFinite(speed)) return;
+            setGameSpeed(speed);
         }catch(NumberFormatException ignored){
         }
     }
@@ -698,6 +746,9 @@ public class MpSectorsMod extends Mod{
                 connection.setReadTimeout(timeoutMs);
                 connection.setDoOutput(true);
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                if(instanceConfig != null && instanceConfig.httpToken != null && !instanceConfig.httpToken.isEmpty()){
+                    connection.setRequestProperty("X-MP-Token", instanceConfig.httpToken);
+                }
 
                 byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
                 connection.setFixedLengthStreamingMode(bytes.length);
@@ -943,13 +994,13 @@ public class MpSectorsMod extends Mod{
             return;
         }
 
-        if(!instanceMode || runner == null || !runner.loaded) return;
+        if(!instanceMode || runner == null) return;
 
         if(now - lastStopCheck >= 1000L){
             lastStopCheck = now;
             if(stopFile != null && stopFile.exists()){
                 Log.info("[mp-sectors] stop flag found, saving and shutting down.");
-                runner.save();
+                if(runner.loaded) runner.save();
                 //the shutdown hook would save a second time
                 runner.loaded = false;
                 try{
@@ -960,6 +1011,12 @@ public class MpSectorsMod extends Mod{
                 return;
             }
         }
+
+        if(!runner.loaded) return;
+
+        //the coordinator only checks the home, so an instance of the start sector would never be
+        //marked captured and the rest of the tech tree would stay locked forever
+        runner.checkCapture();
 
         if(now - lastStatus >= 2000L){
             lastStatus = now;
@@ -1116,7 +1173,7 @@ public class MpSectorsMod extends Mod{
         if(runner == null) return;
 
         try{
-            StringBuilder json = new StringBuilder("{\"sector\":\"").append(runner.sectorName).append("\",");
+            StringBuilder json = new StringBuilder("{\"sector\":\"").append(Coordinator.esc(runner.sectorName)).append("\",");
             json.append("\"count\":").append(Groups.player.size()).append(',');
             json.append("\"wave\":").append(Vars.state.wave).append(',');
 
@@ -1144,6 +1201,12 @@ public class MpSectorsMod extends Mod{
     }
 
     private void shutdown(){
+        //release the Steam API/lobby before the process dies
+        try{
+            SteamSupport.shutdown();
+        }catch(Throwable ignored){
+        }
+
         try{
             if(coordinator != null){
                 coordinator.shutdown();

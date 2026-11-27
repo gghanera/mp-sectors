@@ -117,6 +117,25 @@ function Get-Instance($state, $name){
     return @($state | Where-Object { $_.sector -eq $name })[0]
 }
 
+#a stored PID can be reused by an unrelated process; only trust it while its start time matches
+function Test-StartedProcess($proc, $startedAt){
+    if(-not $proc -or -not $startedAt){ return $false }
+    try{
+        if($startedAt -isnot [datetime]){
+            $startedAt = [datetime]::ParseExact([string]$startedAt, "s", [Globalization.CultureInfo]::InvariantCulture)
+        }
+        return [math]::Abs(($proc.StartTime - $startedAt).TotalSeconds) -lt 120
+    }catch{ return $false }
+}
+
+function Get-OwnedProcess($processId, $startedAt){
+    if([int]$processId -le 0){ return $null }
+    $proc = Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue
+    if(-not $proc){ return $null }
+    if(Test-StartedProcess $proc $startedAt){ return $proc }
+    return $null
+}
+
 switch($Action){
     'init' {
         Initialize-Campaign
@@ -171,6 +190,8 @@ switch($Action){
         $err = Join-Path $dir "server.err.log"
 
         Write-Host "starting $Sector on port $Port ..."
+        # a stop interrupted during its wait leaves these behind; the new process would exit at once
+        Remove-Item (Join-Path $dir "stop.flag"), (Join-Path $dir "status.json") -ErrorAction SilentlyContinue
         $java = Get-Java
         $proc = Start-Process -FilePath $java `
             -ArgumentList "-Xmx${MemoryMb}m", "-jar", "`"$ServerJar`"" `
@@ -189,22 +210,27 @@ switch($Action){
         })
         Write-State $state
 
-        #wait for the mod to report the sector
-        $deadline = (Get-Date).AddSeconds(45)
+        #wait for the mod to report the sector; a failed start must not leave a dead entry behind
         $ok = $false
-        while((Get-Date) -lt $deadline){
-            Start-Sleep -Milliseconds 500
-            if($proc.HasExited){ break }
-            if((Test-Path $log) -and (Select-String -Path $log -Pattern "sector .* loaded on port" -Quiet -ErrorAction SilentlyContinue)){
-                $ok = $true
-                break
+        try{
+            $deadline = (Get-Date).AddSeconds(45)
+            while((Get-Date) -lt $deadline){
+                Start-Sleep -Milliseconds 500
+                if($proc.HasExited){ break }
+                if((Test-Path $log) -and (Select-String -Path $log -Pattern "sector .* loaded on port" -Quiet -ErrorAction SilentlyContinue)){
+                    $ok = $true
+                    break
+                }
             }
-        }
 
-        if($ok){
+            if(-not $ok){ throw "instance did not report a loaded sector; see $log" }
             Write-Host "ready: $Sector -> 127.0.0.1:$Port" -ForegroundColor Green
-        }else{
-            Write-Host "instance did not report a loaded sector; see $log" -ForegroundColor Yellow
+        }finally{
+            if(-not $ok){
+                if(-not $proc.HasExited){ taskkill /PID $proc.Id /T /F 2>$null | Out-Null }
+                Write-State ($state | Where-Object { $_.sector -ne $Sector })
+                Write-Host "start failed: $Sector (see $log)" -ForegroundColor Yellow
+            }
         }
     }
 
@@ -228,15 +254,26 @@ switch($Action){
             if(-not (Test-Port $entry.port)){ break }
         }
 
+        $stillRunning = $false
         if(Test-Port $entry.port){
-            Write-Host "process did not stop in time, killing" -ForegroundColor Yellow
-            taskkill /PID $entry.pid /T /F 2>$null | Out-Null
-            Start-Sleep -Seconds 2
+            $proc = Get-OwnedProcess $entry.pid $entry.started
+            if($proc){
+                Write-Host "process did not stop in time, killing" -ForegroundColor Yellow
+                taskkill /PID $proc.Id /T /F 2>$null | Out-Null
+                Start-Sleep -Seconds 2
+            }else{
+                $stillRunning = $true
+                Write-Host "port $($entry.port) is still open, but pid $($entry.pid) is not the saved $Sector process; not killing" -ForegroundColor Yellow
+            }
         }
 
         Remove-Item (Join-Path $dir "stop.flag") -ErrorAction SilentlyContinue
-        Write-State ($state | Where-Object { $_.sector -ne $Sector })
-        Write-Host "stopped: $Sector"
+        if($stillRunning){
+            Write-Host "instance $Sector is still running; entry kept" -ForegroundColor Yellow
+        }else{
+            Write-State ($state | Where-Object { $_.sector -ne $Sector })
+            Write-Host "stopped: $Sector"
+        }
     }
 
     'coordinator' {
@@ -261,6 +298,16 @@ switch($Action){
         $steamJar = if($SteamDir){ Join-Path $SteamDir "jre\desktop.jar" } else { "" }
         $useSteam = [bool]($Steam -and ($steamJar -ne "") -and (Test-Path $steamJar))
 
+        # keep hand-set options the launcher does not own
+        $cfgPath = Join-Path $dir "config\mp-coordinator.json"
+        $oldCfg = $null
+        if(Test-Path $cfgPath){
+            try { $oldCfg = Get-Content $cfgPath -Raw | ConvertFrom-Json } catch { $oldCfg = $null }
+        }
+        $updateCheck = if($oldCfg -and $null -ne $oldCfg.updateCheck){ [bool]$oldCfg.updateCheck } else { $true }
+        $httpToken = if($oldCfg -and $null -ne $oldCfg.httpToken){ [string]$oldCfg.httpToken } else { "" }
+        $publicHost = if($oldCfg -and $null -ne $oldCfg.publicHost){ [string]$oldCfg.publicHost } else { "" }
+
         $cfg = @{
             campaign         = $Campaign.Replace('\', '/')
             snapshotDir      = $SnapshotDir.Replace('\', '/')
@@ -275,13 +322,16 @@ switch($Action){
             memoryMb         = $MemoryMb
             planet           = $Planet
             moderator        = $Moderator
+            updateCheck      = $updateCheck
+            httpToken        = $httpToken
+            publicHost       = $publicHost
             serverJar        = (Resolve-Path $ServerJar).Path.Replace('\', '/')
             javaPath         = ""
             steam            = $useSteam
             steamJar         = $steamJar.Replace('\', '/')
             steamNative      = $SteamDir.Replace('\', '/')
         } | ConvertTo-Json -Depth 3
-        Set-Content -Path (Join-Path $dir "config\mp-coordinator.json") -Value $cfg -Encoding utf8
+        Set-Content -Path $cfgPath -Value $cfg -Encoding utf8
 
         $log = Join-Path $dir "server.log"
         $err = Join-Path $dir "server.err.log"
@@ -333,7 +383,12 @@ switch($Action){
 
         $pidFile = Join-Path $dir "coordinator.pid"
         $coordPid = 0
-        if(Test-Path $pidFile){ $coordPid = [int](Get-Content $pidFile -Raw) }
+        $coordStarted = $null
+        if(Test-Path $pidFile){
+            $coordPid = [int](Get-Content $pidFile -Raw)
+            #the pid file is written right after the process starts; its mtime identifies the owner
+            $coordStarted = (Get-Item $pidFile).LastWriteTime
+        }
 
         Set-Content -Path (Join-Path $dir "stop.flag") -Value "stop" -Encoding utf8
         Write-Host "asking coordinator to save and stop ..."
@@ -342,7 +397,7 @@ switch($Action){
         while((Get-Date) -lt $deadline){
             Start-Sleep -Milliseconds 500
             if($coordPid -gt 0){
-                if(-not (Get-Process -Id $coordPid -ErrorAction SilentlyContinue)){ break }
+                if(-not (Get-OwnedProcess $coordPid $coordStarted)){ break }
             }else{
                 #no pid file: the coordinator's HTTP port disappearing means it is gone
                 try{
@@ -353,9 +408,12 @@ switch($Action){
             }
         }
 
-        if($coordPid -gt 0 -and (Get-Process -Id $coordPid -ErrorAction SilentlyContinue)){
+        $coordProc = Get-OwnedProcess $coordPid $coordStarted
+        if($coordProc){
             Write-Host "coordinator did not stop in time, killing" -ForegroundColor Yellow
-            taskkill /PID $coordPid /T /F 2>$null | Out-Null
+            taskkill /PID $coordProc.Id /T /F 2>$null | Out-Null
+        }elseif($coordPid -gt 0 -and (Get-Process -Id $coordPid -ErrorAction SilentlyContinue)){
+            Write-Host "pid $coordPid is no longer the coordinator started from this folder; not killing" -ForegroundColor Yellow
         }
 
         Remove-Item (Join-Path $dir "stop.flag") -ErrorAction SilentlyContinue
